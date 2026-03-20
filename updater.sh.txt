@@ -1,14 +1,26 @@
 #!/bin/bash
 
 # ---------------- CONFIGURATION ----------------
-# Base directory where all your docker containers are located
-BASE_DIR="/home/docker/docker"
+# 1. Load configuration from a .env file if it exists next to the script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+fi
 
-# Log file location
-LOG_FILE="/home/docker/docker/docker-updater/docker_update.log"
+# 2. Set default fallbacks if environment variables aren't defined
+# This allows running inline like: BASE_DIR=/opt/docker ./updater.sh
+BASE_DIR="${BASE_DIR:-/home/docker/docker}"
+LOG_FILE="${LOG_FILE:-$BASE_DIR/docker-updater/docker_update.log}"
 
-# Path to docker binary (verify with 'which docker')
-DOCKER_BIN="/usr/bin/docker"
+# 3. Auto-detect Docker binary location
+if [ -z "$DOCKER_BIN" ]; then
+    if command -v docker >/dev/null 2>&1; then
+        DOCKER_BIN=$(command -v docker)
+    else
+        echo "[FATAL] docker command not found in PATH. Please install Docker or set DOCKER_BIN."
+        exit 1
+    fi
+fi
 # -----------------------------------------------
 
 # Auto-detect all directories containing a docker compose file
