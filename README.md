@@ -25,7 +25,7 @@ A robust, crash-resistant bash script that automatically detects and updates all
 
 ### Configuring for Different Systems / Users
 
-The script comes with safe defaults (e.g., `BASE_DIR="/home/docker/docker"`), but it is fully adaptable for different servers without needing to edit the code. You have two options:
+The script comes with safe defaults (e.g., `BASE_DIR="/home/$USER/docker"`), but it is fully adaptable for different servers without needing to edit the code. You have two options:
 
 **Option A: Using a `.env` file (Recommended)**
 Create a file named `.env` in the exact same folder as `updater.sh` to override defaults securely:
@@ -37,7 +37,7 @@ LOG_FILE=/var/log/docker-updater.log
 **Option B: Using Environment Variables**
 You can pass the variables inline when executing the script, which is perfect for CI/CD or custom cron jobs:
 ```bash
-BASE_DIR=/home/agustin/docker ./updater.sh
+BASE_DIR=/home/$USER/docker ./updater.sh
 ```
 
 *(Note: The script automatically detects the `docker` binary location using your system's PATH. You do not need to configure `DOCKER_BIN` unless your setup is highly non-standard.)*
@@ -68,5 +68,5 @@ You can set this script up to run automatically on a schedule using a cron job. 
 The script generates detailed logs in the path specified by the `LOG_FILE` configuration. You can monitor them live using:
 
 ```bash
-tail -f /home/docker/docker/docker-updater/docker_update.log
+tail -f /home/$USER/docker/docker-updater/docker_update.log
 ```
