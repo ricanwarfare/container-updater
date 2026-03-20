@@ -9,7 +9,7 @@ fi
 
 # 2. Set default fallbacks if environment variables aren't defined
 # This allows running inline like: BASE_DIR=/opt/docker ./updater.sh
-BASE_DIR="${BASE_DIR:-/home/docker/docker}"
+BASE_DIR="${BASE_DIR:-/home/$USER/docker}"
 LOG_FILE="${LOG_FILE:-$BASE_DIR/docker-updater/docker_update.log}"
 
 # 3. Auto-detect Docker binary location
