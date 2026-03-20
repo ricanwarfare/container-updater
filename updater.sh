@@ -86,4 +86,4 @@ log_msg "Global Prune: Removing unused images..."
 $DOCKER_BIN image prune -f >> "$LOG_FILE" 2>&1
 
 log_msg "Global Update finished"
-log_msg "====================================================="
+log_msg "====================================================="
