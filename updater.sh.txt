@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# ---------------- CONFIGURATION ----------------
+# Base directory where all your docker containers are located
+BASE_DIR="/home/docker/docker"
+
+# Log file location
+LOG_FILE="/home/docker/docker/docker-updater/docker_update.log"
+
+# Path to docker binary (verify with 'which docker')
+DOCKER_BIN="/usr/bin/docker"
+# -----------------------------------------------
+
+# Auto-detect all directories containing a docker compose file
+DOCKER_DIRS=()
+for dir in "$BASE_DIR"/*/ ; do
+    dir="${dir%/}" # Remove trailing slash
+    
+    # Only append directories that actually contain a compose file
+    if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/docker-compose.yaml" ] || [ -f "$dir/compose.yml" ] || [ -f "$dir/compose.yaml" ]; then
+        DOCKER_DIRS+=("$dir")
+    fi
+done
+
+# Option: Create log directory if it doesn't exist
+LOG_DIR=$(dirname "$LOG_FILE")
+mkdir -p "$LOG_DIR"
+
+# Helper function for logging to file with timestamps
+log_msg() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+log_msg "====================================================="
+log_msg "Global Update started"
+
+# Loop through each directory in the array
+for DIR in "${DOCKER_DIRS[@]}"; do
+    log_msg "Processing: $DIR"
+
+    if [ ! -d "$DIR" ]; then
+        log_msg "  [ERROR] Directory $DIR does not exist. Skipping."
+        continue
+    fi
+
+    # Navigate to directory safely
+    if ! cd "$DIR"; then
+        log_msg "  [ERROR] Failed to enter directory $DIR. Skipping."
+        continue
+    fi
+
+
+    # 1. Pull the latest images for this specific compose file
+    log_msg "  - Pulling images..."
+    if ! $DOCKER_BIN compose pull >> "$LOG_FILE" 2>&1; then
+        log_msg "  [ERROR] Failed to pull images in $DIR. Skipping update."
+        continue
+    fi
+
+    # 2. Recreate containers (only if newer image exists)
+    # The --wait flag is crucial: it pauses the script until the container is fully
+    # running (and passes health checks if defined). This prevents moving on while
+    # an updated container is repeatedly crashing in the background.
+    log_msg "  - Updating and starting containers..."
+    if ! $DOCKER_BIN compose up -d --remove-orphans --wait >> "$LOG_FILE" 2>&1; then
+        log_msg "  [ERROR] Containers in $DIR completely failed to start or be healthy!"
+    else
+        log_msg "  - Successfully updated $DIR."
+    fi
+done
+
+# 3. Cleanup unused images (Run once globally at the end)
+log_msg "Global Prune: Removing unused images..."
+$DOCKER_BIN image prune -f >> "$LOG_FILE" 2>&1
+
+log_msg "Global Update finished"
+log_msg "====================================================="
