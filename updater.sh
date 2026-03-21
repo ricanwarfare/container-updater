@@ -12,6 +12,9 @@ fi
 BASE_DIR="${BASE_DIR:-/home/$USER/docker}"
 LOG_FILE="${LOG_FILE:-$BASE_DIR/docker-updater/docker_update.log}"
 
+# Parse EXCLUDE_DIRS (colon-separated list) into an array
+IFS=':' read -ra EXCLUDED <<< "${EXCLUDE_DIRS:-}"
+
 # 3. Auto-detect Docker binary location
 if [ -z "$DOCKER_BIN" ]; then
     if command -v docker >/dev/null 2>&1; then
@@ -27,7 +30,18 @@ fi
 DOCKER_DIRS=()
 for dir in "$BASE_DIR"/*/ ; do
     dir="${dir%/}" # Remove trailing slash
-    
+    basename="$(basename "$dir")"
+
+    # Skip excluded directories
+    skip=false
+    for ex in "${EXCLUDED[@]}"; do
+        if [ "$basename" = "$ex" ]; then
+            skip=true
+            break
+        fi
+    done
+    $skip && continue
+
     # Only append directories that actually contain a compose file
     if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/docker-compose.yaml" ] || [ -f "$dir/compose.yml" ] || [ -f "$dir/compose.yaml" ]; then
         DOCKER_DIRS+=("$dir")

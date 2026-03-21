@@ -5,6 +5,7 @@ A robust, crash-resistant bash script that automatically detects and updates all
 ## Features
 
 - **Auto-Detection**: Scans a specified base directory for any folders containing a `docker-compose.yml` or `compose.yml` file, eliminating the need to manually list out every single container stack.
+- **Folder Exclusion**: Allows you to skip specific directories from the scan using a simple colon-separated list.
 - **Crash Prevention**: Uses the `--wait` flag during `docker compose up`. The script pauses until containers are fully running and healthy, catching any immediate crash-loops introduced by bad updates.
 - **Safe Directory Navigation**: Implements strict directory navigation checks. If a folder's permissions change or it is deleted during the run, the script gracefully logs it and skips, preventing commands from running in the wrong path.
 - **Comprehensive Logging**: Outputs detailed, timestamp-accurate logs to an auto-generated log file, making it easy to track the timeline of when a stack was updated or if a failure occurred.
@@ -17,7 +18,7 @@ A robust, crash-resistant bash script that automatically detects and updates all
 
 ## Setup & Configuration
 
-1. Rename `updater.sh.txt` to `updater.sh` and place it wherever you prefer (e.g., in a `scripts` folder).
+1. Clone or download `updater.sh` and place it wherever you prefer (e.g., in a `scripts` folder).
 2. Make the script executable:
    ```bash
    chmod +x updater.sh
@@ -32,15 +33,26 @@ Create a file named `.env` in the exact same folder as `updater.sh` to override 
 ```env
 BASE_DIR=/opt/my-containers
 LOG_FILE=/var/log/docker-updater.log
+EXCLUDE_DIRS=container-updater:backups
 ```
 
 **Option B: Using Environment Variables**
 You can pass the variables inline when executing the script, which is perfect for CI/CD or custom cron jobs:
 ```bash
-BASE_DIR=/home/$USER/docker ./updater.sh
+BASE_DIR=/home/$USER/docker EXCLUDE_DIRS=backups ./updater.sh
 ```
 
 *(Note: The script automatically detects the `docker` binary location using your system's PATH. You do not need to configure `DOCKER_BIN` unless your setup is highly non-standard.)*
+
+### Excluding Folders
+
+If certain directories inside your `BASE_DIR` should never be updated, you can exclude them by setting the `EXCLUDE_DIRS` variable with a colon-separated list of folder names:
+
+```env
+EXCLUDE_DIRS=container-updater:backups:testing
+```
+
+Only the folder name (basename) is needed — not the full path.
 
 ## Usage
 
@@ -68,5 +80,5 @@ You can set this script up to run automatically on a schedule using a cron job. 
 The script generates detailed logs in the path specified by the `LOG_FILE` configuration. You can monitor them live using:
 
 ```bash
-tail -f /home/$USER/docker/docker-updater/docker_update.log
+tail -f /home/$USER/docker/container-updater/log.log
 ```
