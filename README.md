@@ -26,7 +26,7 @@ A robust, crash-resistant bash script that automatically detects and updates all
 
 ### Configuring for Different Systems / Users
 
-The script comes with safe defaults (e.g., `BASE_DIR="/home/$USER/docker"`), but it is fully adaptable for different servers without needing to edit the code. You have two options:
+The script comes with safe defaults (e.g., `BASE_DIR="$HOME/docker"`), but it is fully adaptable for different servers without needing to edit the code. You have two options:
 
 **Option A: Using a `.env` file (Recommended)**
 Create a file named `.env` in the exact same folder as `updater.sh` to override defaults securely:
@@ -43,6 +43,24 @@ BASE_DIR=/home/$USER/docker EXCLUDE_DIRS=backups ./updater.sh
 ```
 
 *(Note: The script automatically detects the `docker` binary location using your system's PATH. You do not need to configure `DOCKER_BIN` unless your setup is highly non-standard.)*
+
+### Additional Configuration Options
+
+**Dry-Run Mode**
+Test your configuration without making any actual changes:
+```bash
+DRY_RUN=true ./updater.sh
+```
+Or set in `.env`:
+```env
+DRY_RUN=true
+```
+
+**Failure Notifications**
+Get notified when container updates fail via a webhook (e.g., Slack, Discord):
+```env
+NOTIFY_FAILURE_WEBHOOK=https://hooks.slack.com/services/XXX/YYY/ZZZ
+```
 
 ### Excluding Folders
 

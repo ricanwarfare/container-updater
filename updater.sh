@@ -9,8 +9,9 @@ fi
 
 # 2. Set default fallbacks if environment variables aren't defined
 # This allows running inline like: BASE_DIR=/opt/docker ./updater.sh
-BASE_DIR="${BASE_DIR:-/home/$USER/docker}"
+BASE_DIR="${BASE_DIR:-$HOME/docker}"
 LOG_FILE="${LOG_FILE:-$BASE_DIR/docker-updater/docker_update.log}"
+DRY_RUN="${DRY_RUN:-false}"
 
 # Parse EXCLUDE_DIRS (colon-separated list) into an array
 IFS=':' read -ra EXCLUDED <<< "${EXCLUDE_DIRS:-}"
@@ -23,6 +24,12 @@ if [ -z "$DOCKER_BIN" ]; then
         echo "[FATAL] docker command not found in PATH. Please install Docker or set DOCKER_BIN."
         exit 1
     fi
+fi
+
+# 4. Validate BASE_DIR exists
+if [ ! -d "$BASE_DIR" ]; then
+    echo "[FATAL] BASE_DIR '$BASE_DIR' does not exist"
+    exit 1
 fi
 # -----------------------------------------------
 
@@ -60,6 +67,15 @@ log_msg() {
 log_msg "====================================================="
 log_msg "Global Update started"
 
+# Check if any compose directories were found
+if [ ${#DOCKER_DIRS[@]} -eq 0 ]; then
+    log_msg "[WARNING] No docker compose directories found in $BASE_DIR"
+    log_msg "Global Update finished"
+    log_msg "====================================================="
+    echo "[WARNING] No docker compose directories found in $BASE_DIR"
+    exit 0
+fi
+
 # Loop through each directory in the array
 for DIR in "${DOCKER_DIRS[@]}"; do
     log_msg "Processing: $DIR"
@@ -77,27 +93,46 @@ for DIR in "${DOCKER_DIRS[@]}"; do
 
 
     # 1. Pull the latest images for this specific compose file
-    log_msg "  - Pulling images..."
-    if ! $DOCKER_BIN compose pull >> "$LOG_FILE" 2>&1; then
-        log_msg "  [ERROR] Failed to pull images in $DIR. Skipping update."
-        continue
+    if [ "$DRY_RUN" = "true" ]; then
+        log_msg "  [DRY RUN] Would pull images"
+    else
+        log_msg "  - Pulling images..."
+        if ! "$DOCKER_BIN" compose pull >> "$LOG_FILE" 2>&1; then
+            log_msg "  [ERROR] Failed to pull images in $DIR. Skipping update."
+            continue
+        fi
     fi
 
     # 2. Recreate containers (only if newer image exists)
     # The --wait flag is crucial: it pauses the script until the container is fully
     # running (and passes health checks if defined). This prevents moving on while
     # an updated container is repeatedly crashing in the background.
-    log_msg "  - Updating and starting containers..."
-    if ! $DOCKER_BIN compose up -d --remove-orphans --wait >> "$LOG_FILE" 2>&1; then
-        log_msg "  [ERROR] Containers in $DIR completely failed to start or be healthy!"
+    if [ "$DRY_RUN" = "true" ]; then
+        log_msg "  [DRY RUN] Would update and start containers"
     else
-        log_msg "  - Successfully updated $DIR."
+        log_msg "  - Updating and starting containers..."
+        if ! "$DOCKER_BIN" compose up -d --remove-orphans --wait >> "$LOG_FILE" 2>&1; then
+            log_msg "  [ERROR] Containers in $DIR completely failed to start or be healthy!"
+            # Trigger failure notification hook if defined
+            if [ -n "$NOTIFY_FAILURE_WEBHOOK" ]; then
+                curl -s -X POST "$NOTIFY_FAILURE_WEBHOOK" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"service\":\"$DIR\",\"error\":\"Containers failed to start\",\"host\":\"$(hostname)\"}" \
+                    >> "$LOG_FILE" 2>&1
+            fi
+        else
+            log_msg "  - Successfully updated $DIR."
+        fi
     fi
 done
 
 # 3. Cleanup unused images (Run once globally at the end)
-log_msg "Global Prune: Removing unused images..."
-$DOCKER_BIN image prune -f >> "$LOG_FILE" 2>&1
+if [ "$DRY_RUN" = "true" ]; then
+    log_msg "Global Prune: [DRY RUN] Would remove unused images"
+else
+    log_msg "Global Prune: Removing unused images..."
+    "$DOCKER_BIN" image prune -f >> "$LOG_FILE" 2>&1
+fi
 
 log_msg "Global Update finished"
 log_msg "====================================================="
