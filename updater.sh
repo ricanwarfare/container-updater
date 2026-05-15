@@ -1,23 +1,25 @@
 #!/bin/bash
+set -eo pipefail
 
 # ---------------- CONFIGURATION ----------------
-# 1. Load configuration from a .env file if it exists next to the script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
 fi
 
-# 2. Set default fallbacks if environment variables aren't defined
-# This allows running inline like: BASE_DIR=/opt/docker ./updater.sh
 BASE_DIR="${BASE_DIR:-$HOME/docker}"
 LOG_FILE="${LOG_FILE:-$BASE_DIR/docker-updater/docker_update.log}"
 DRY_RUN="${DRY_RUN:-false}"
+PRUNE_IMAGES="${PRUNE_IMAGES:-true}"
+LOCK_FILE="${LOCK_FILE:-$BASE_DIR/docker-updater/updater.lock}"
+VERBOSE="${VERBOSE:-false}"
 
-# Parse EXCLUDE_DIRS (colon-separated list) into an array
-IFS=':' read -ra EXCLUDED <<< "${EXCLUDE_DIRS:-}"
+EXCLUDED=()
+if [ -n "${EXCLUDE_DIRS:-}" ]; then
+    IFS=':' read -ra EXCLUDED <<< "$EXCLUDE_DIRS"
+fi
 
-# 3. Auto-detect Docker binary location
-if [ -z "$DOCKER_BIN" ]; then
+if [ -z "${DOCKER_BIN:-}" ]; then
     if command -v docker >/dev/null 2>&1; then
         DOCKER_BIN=$(command -v docker)
     else
@@ -26,20 +28,29 @@ if [ -z "$DOCKER_BIN" ]; then
     fi
 fi
 
-# 4. Validate BASE_DIR exists
 if [ ! -d "$BASE_DIR" ]; then
     echo "[FATAL] BASE_DIR '$BASE_DIR' does not exist"
     exit 1
 fi
 # -----------------------------------------------
 
-# Auto-detect all directories containing a docker compose file
+if [ -f "$LOCK_FILE" ]; then
+    LOCK_PID=$(cat "$LOCK_FILE")
+    if kill -0 "$LOCK_PID" 2>/dev/null; then
+        echo "[FATAL] Another updater instance is already running (PID $LOCK_PID). Remove $LOCK_FILE if stale."
+        exit 1
+    fi
+    rm -f "$LOCK_FILE"
+fi
+mkdir -p "$(dirname "$LOCK_FILE")"
+echo $$ > "$LOCK_FILE"
+trap 'rm -f "$LOCK_FILE"' EXIT
+
 DOCKER_DIRS=()
 for dir in "$BASE_DIR"/*/ ; do
-    dir="${dir%/}" # Remove trailing slash
+    dir="${dir%/}"
     basename="$(basename "$dir")"
 
-    # Skip excluded directories
     skip=false
     for ex in "${EXCLUDED[@]}"; do
         if [ "$basename" = "$ex" ]; then
@@ -47,27 +58,43 @@ for dir in "$BASE_DIR"/*/ ; do
             break
         fi
     done
-    $skip && continue
+    if $skip; then
+        continue
+    fi
 
-    # Only append directories that actually contain a compose file
     if [ -f "$dir/docker-compose.yml" ] || [ -f "$dir/docker-compose.yaml" ] || [ -f "$dir/compose.yml" ] || [ -f "$dir/compose.yaml" ]; then
         DOCKER_DIRS+=("$dir")
     fi
 done
 
-# Option: Create log directory if it doesn't exist
 LOG_DIR=$(dirname "$LOG_FILE")
-mkdir -p "$LOG_DIR"
+if ! mkdir -p "$LOG_DIR"; then
+    echo "[FATAL] Failed to create log directory '$LOG_DIR'"
+    exit 1
+fi
 
-# Helper function for logging to file with timestamps
 log_msg() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    echo "$msg" >> "$LOG_FILE"
+    if [ "$VERBOSE" = "true" ]; then
+        echo "$msg"
+    fi
+}
+
+send_failure_webhook() {
+    local service="$1"
+    local error="$2"
+    if [ -n "${NOTIFY_FAILURE_WEBHOOK:-}" ]; then
+        curl -s -X POST "$NOTIFY_FAILURE_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{\"service\":\"$service\",\"error\":\"$error\",\"host\":\"$(hostname)\"}" \
+            >> "$LOG_FILE" 2>&1 || true
+    fi
 }
 
 log_msg "====================================================="
 log_msg "Global Update started"
 
-# Check if any compose directories were found
 if [ ${#DOCKER_DIRS[@]} -eq 0 ]; then
     log_msg "[WARNING] No docker compose directories found in $BASE_DIR"
     log_msg "Global Update finished"
@@ -76,7 +103,6 @@ if [ ${#DOCKER_DIRS[@]} -eq 0 ]; then
     exit 0
 fi
 
-# Loop through each directory in the array
 for DIR in "${DOCKER_DIRS[@]}"; do
     log_msg "Processing: $DIR"
 
@@ -85,54 +111,65 @@ for DIR in "${DOCKER_DIRS[@]}"; do
         continue
     fi
 
-    # Navigate to directory safely
-    if ! cd "$DIR"; then
+    if ! pushd "$DIR" > /dev/null; then
         log_msg "  [ERROR] Failed to enter directory $DIR. Skipping."
         continue
     fi
 
+    COMPOSE_FILE=""
+    for cf in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        if [ -f "$cf" ]; then
+            COMPOSE_FILE="$cf"
+            break
+        fi
+    done
 
-    # 1. Pull the latest images for this specific compose file
+    if [ -z "$COMPOSE_FILE" ]; then
+        log_msg "  [ERROR] No compose file found in $DIR. Skipping."
+        popd > /dev/null
+        continue
+    fi
+
     if [ "$DRY_RUN" = "true" ]; then
-        log_msg "  [DRY RUN] Would pull images"
+        log_msg "  [DRY RUN] Would run: $DOCKER_BIN compose -f $DIR/$COMPOSE_FILE pull"
     else
         log_msg "  - Pulling images..."
-        if ! "$DOCKER_BIN" compose pull >> "$LOG_FILE" 2>&1; then
+        if ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" pull >> "$LOG_FILE" 2>&1; then
             log_msg "  [ERROR] Failed to pull images in $DIR. Skipping update."
+            send_failure_webhook "$DIR" "Failed to pull images"
+            popd > /dev/null
             continue
         fi
     fi
 
-    # 2. Recreate containers (only if newer image exists)
-    # The --wait flag is crucial: it pauses the script until the container is fully
-    # running (and passes health checks if defined). This prevents moving on while
-    # an updated container is repeatedly crashing in the background.
     if [ "$DRY_RUN" = "true" ]; then
-        log_msg "  [DRY RUN] Would update and start containers"
+        log_msg "  [DRY RUN] Would run: $DOCKER_BIN compose -f $DIR/$COMPOSE_FILE up -d --remove-orphans --wait"
     else
         log_msg "  - Updating and starting containers..."
-        if ! "$DOCKER_BIN" compose up -d --remove-orphans --wait >> "$LOG_FILE" 2>&1; then
+        if ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" up -d --remove-orphans --wait >> "$LOG_FILE" 2>&1; then
             log_msg "  [ERROR] Containers in $DIR completely failed to start or be healthy!"
-            # Trigger failure notification hook if defined
-            if [ -n "$NOTIFY_FAILURE_WEBHOOK" ]; then
-                curl -s -X POST "$NOTIFY_FAILURE_WEBHOOK" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"service\":\"$DIR\",\"error\":\"Containers failed to start\",\"host\":\"$(hostname)\"}" \
-                    >> "$LOG_FILE" 2>&1
-            fi
+            send_failure_webhook "$DIR" "Containers failed to start"
         else
             log_msg "  - Successfully updated $DIR."
         fi
     fi
+
+    popd > /dev/null
 done
 
-# 3. Cleanup unused images (Run once globally at the end)
-if [ "$DRY_RUN" = "true" ]; then
-    log_msg "Global Prune: [DRY RUN] Would remove unused images"
+if [ "$PRUNE_IMAGES" = "true" ]; then
+    if [ "$DRY_RUN" = "true" ]; then
+        log_msg "Global Prune: [DRY RUN] Would run: $DOCKER_BIN image prune -f"
+    else
+        log_msg "Global Prune: Removing unused images..."
+        "$DOCKER_BIN" image prune -f >> "$LOG_FILE" 2>&1 || {
+            log_msg "Global Prune: [WARNING] Image pruning failed"
+        }
+    fi
 else
-    log_msg "Global Prune: Removing unused images..."
-    "$DOCKER_BIN" image prune -f >> "$LOG_FILE" 2>&1
+    log_msg "Global Prune: Skipped (PRUNE_IMAGES is disabled)"
 fi
 
 log_msg "Global Update finished"
 log_msg "====================================================="
+exit 0

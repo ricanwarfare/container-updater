@@ -1,15 +1,18 @@
 # Auto Docker Updater
 
-A robust, crash-resistant bash script that automatically detects and updates all your Docker Compose stacks. 
+A robust, crash-resistant bash script that automatically detects and updates all your Docker Compose stacks.
 
 ## Features
 
 - **Auto-Detection**: Scans a specified base directory for any folders containing a `docker-compose.yml` or `compose.yml` file, eliminating the need to manually list out every single container stack.
 - **Folder Exclusion**: Allows you to skip specific directories from the scan using a simple colon-separated list.
 - **Crash Prevention**: Uses the `--wait` flag during `docker compose up`. The script pauses until containers are fully running and healthy, catching any immediate crash-loops introduced by bad updates.
-- **Safe Directory Navigation**: Implements strict directory navigation checks. If a folder's permissions change or it is deleted during the run, the script gracefully logs it and skips, preventing commands from running in the wrong path.
+- **Safe Directory Navigation**: Uses `pushd`/`popd` for safe directory navigation. If a folder's permissions change or it is deleted during the run, the script gracefully logs it and skips.
+- **Overlap Protection**: A lock file prevents concurrent execution from overlapping cron runs or manual invocations.
 - **Comprehensive Logging**: Outputs detailed, timestamp-accurate logs to an auto-generated log file, making it easy to track the timeline of when a stack was updated or if a failure occurred.
-- **Auto Cleanup**: Automatically prunes dangling and unused Docker images at the end of the update cycle to save disk space.
+- **Failure Notifications**: Optionally send webhook notifications (Slack, Discord, etc.) when pull or up operations fail.
+- **Auto Cleanup**: Optionally prunes dangling and unused Docker images at the end of the update cycle to save disk space. Controllable via `PRUNE_IMAGES` config flag.
+- **Strict Error Handling**: Uses `set -euo pipefail` to catch unset variables, pipe failures, and unhandled errors early.
 
 ## Requirements
 
@@ -34,6 +37,8 @@ Create a file named `.env` in the exact same folder as `updater.sh` to override 
 BASE_DIR=/opt/my-containers
 LOG_FILE=/var/log/docker-updater.log
 EXCLUDE_DIRS=container-updater:backups
+PRUNE_IMAGES=true
+VERBOSE=true
 ```
 
 **Option B: Using Environment Variables**
@@ -47,7 +52,7 @@ BASE_DIR=/home/$USER/docker EXCLUDE_DIRS=backups ./updater.sh
 ### Additional Configuration Options
 
 **Dry-Run Mode**
-Test your configuration without making any actual changes:
+Test your configuration without making any actual changes. Dry-run logs now show the exact commands that would be executed:
 ```bash
 DRY_RUN=true ./updater.sh
 ```
@@ -56,10 +61,28 @@ Or set in `.env`:
 DRY_RUN=true
 ```
 
+**Verbose Mode**
+Print all log messages to the console in addition to the log file (useful for interactive debugging):
+```env
+VERBOSE=true
+```
+
+**Image Pruning**
+Control whether unused Docker images are pruned after the update cycle (enabled by default):
+```env
+PRUNE_IMAGES=false
+```
+
 **Failure Notifications**
-Get notified when container updates fail via a webhook (e.g., Slack, Discord):
+Get notified when container updates fail via a webhook (e.g., Slack, Discord). Notifications now fire on both pull failures and up failures:
 ```env
 NOTIFY_FAILURE_WEBHOOK=https://hooks.slack.com/services/XXX/YYY/ZZZ
+```
+
+**Lock File**
+Prevents overlapping runs by creating a PID-based lock file. If the lock is stale (process no longer exists), it is automatically cleaned up:
+```env
+LOCK_FILE=/path/to/updater.lock
 ```
 
 ### Excluding Folders
