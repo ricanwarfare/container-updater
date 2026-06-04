@@ -130,11 +130,32 @@ for DIR in "${DOCKER_DIRS[@]}"; do
         continue
     fi
 
+    # Get services that are currently running, restarting, or paused
+    RUNNING_SERVICES=()
+    if ! PS_OUTPUT=$( "$DOCKER_BIN" compose -f "$COMPOSE_FILE" ps --services --status running --status restarting --status paused 2>&1 ); then
+        log_msg "  [ERROR] Failed to check service status in $DIR. Output: $PS_OUTPUT"
+        send_failure_webhook "$DIR" "Failed to check service status"
+        popd > /dev/null
+        continue
+    fi
+
+    if [ -z "$PS_OUTPUT" ]; then
+        log_msg "  - No services are currently running. Skipping update to avoid restarting manually stopped containers."
+        popd > /dev/null
+        continue
+    fi
+
+    while IFS= read -r service; do
+        if [ -n "$service" ]; then
+            RUNNING_SERVICES+=("$service")
+        fi
+    done <<< "$PS_OUTPUT"
+
     if [ "$DRY_RUN" = "true" ]; then
-        log_msg "  [DRY RUN] Would run: $DOCKER_BIN compose -f $DIR/$COMPOSE_FILE pull"
+        log_msg "  [DRY RUN] Would run: $DOCKER_BIN compose -f $DIR/$COMPOSE_FILE pull ${RUNNING_SERVICES[*]}"
     else
-        log_msg "  - Pulling images..."
-        if ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" pull >> "$LOG_FILE" 2>&1; then
+        log_msg "  - Pulling images for running services (${RUNNING_SERVICES[*]})..."
+        if ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" pull "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
             log_msg "  [ERROR] Failed to pull images in $DIR. Skipping update."
             send_failure_webhook "$DIR" "Failed to pull images"
             popd > /dev/null
@@ -143,10 +164,10 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     fi
 
     if [ "$DRY_RUN" = "true" ]; then
-        log_msg "  [DRY RUN] Would run: $DOCKER_BIN compose -f $DIR/$COMPOSE_FILE up -d --remove-orphans --wait"
+        log_msg "  [DRY RUN] Would run: $DOCKER_BIN compose -f $DIR/$COMPOSE_FILE up -d --remove-orphans --wait ${RUNNING_SERVICES[*]}"
     else
-        log_msg "  - Updating and starting containers..."
-        if ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" up -d --remove-orphans --wait >> "$LOG_FILE" 2>&1; then
+        log_msg "  - Updating and starting running containers (${RUNNING_SERVICES[*]})..."
+        if ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" up -d --remove-orphans --wait "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
             log_msg "  [ERROR] Containers in $DIR completely failed to start or be healthy!"
             send_failure_webhook "$DIR" "Containers failed to start"
         else
