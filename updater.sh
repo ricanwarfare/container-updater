@@ -8,10 +8,10 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
 fi
 
 BASE_DIR="${BASE_DIR:-$HOME/docker}"
-LOG_FILE="${LOG_FILE:-$BASE_DIR/docker-updater/docker_update.log}"
+LOG_FILE="${LOG_FILE:-$BASE_DIR/container-updater/updater.log}"
 DRY_RUN="${DRY_RUN:-false}"
 PRUNE_IMAGES="${PRUNE_IMAGES:-true}"
-LOCK_FILE="${LOCK_FILE:-$BASE_DIR/docker-updater/updater.lock}"
+LOCK_FILE="${LOCK_FILE:-$BASE_DIR/container-updater/updater.lock}"
 VERBOSE="${VERBOSE:-false}"
 
 EXCLUDED=()

@@ -35,7 +35,7 @@ The script comes with safe defaults (e.g., `BASE_DIR="$HOME/docker"`), but it is
 Create a file named `.env` in the exact same folder as `updater.sh` to override defaults securely:
 ```env
 BASE_DIR=/opt/my-containers
-LOG_FILE=/var/log/docker-updater.log
+LOG_FILE=/var/log/container-updater.log
 EXCLUDE_DIRS=container-updater:backups
 PRUNE_IMAGES=true
 VERBOSE=true
@@ -121,5 +121,5 @@ You can set this script up to run automatically on a schedule using a cron job. 
 The script generates detailed logs in the path specified by the `LOG_FILE` configuration. You can monitor them live using:
 
 ```bash
-tail -f /home/$USER/docker/container-updater/log.log
+tail -f /home/$USER/docker/container-updater/updater.log
 ```
