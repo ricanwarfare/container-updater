@@ -13,6 +13,8 @@ DRY_RUN="${DRY_RUN:-false}"
 PRUNE_IMAGES="${PRUNE_IMAGES:-true}"
 LOCK_FILE="${LOCK_FILE:-$BASE_DIR/container-updater/updater.lock}"
 VERBOSE="${VERBOSE:-false}"
+AUTOSTART="${AUTOSTART:-true}"
+AUTOSTART_RETRY_DELAY="${AUTOSTART_RETRY_DELAY:-10}"
 
 EXCLUDED=()
 if [ -n "${EXCLUDE_DIRS:-}" ]; then
@@ -94,6 +96,69 @@ send_failure_webhook() {
 
 log_msg "====================================================="
 log_msg "Global Update started"
+
+# ---------------- AUTOSTART EXITED CONTAINERS ----------------
+# Start exited containers that have unless-stopped or always restart policy.
+# This self-heals containers that got stuck because a dependency (e.g. VPN)
+# was down when they tried to restart.
+if [ "$AUTOSTART" = "true" ]; then
+    log_msg "Autostart: Checking for exited containers with unless-stopped/always restart policy..."
+
+    EXITED_CONTAINERS=$("$DOCKER_BIN" ps -a --filter status=exited --format '{{.Names}}' 2>/dev/null || true)
+
+    if [ -n "$EXITED_CONTAINERS" ]; then
+        TO_START=()
+        RETRY_LIST=()
+
+        while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            POLICY=$("$DOCKER_BIN" inspect "$name" --format '{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null || echo "")
+            if [ "$POLICY" = "unless-stopped" ] || [ "$POLICY" = "always" ]; then
+                TO_START+=("$name")
+            fi
+        done <<< "$EXITED_CONTAINERS"
+
+        if [ ${#TO_START[@]} -gt 0 ]; then
+            log_msg "  Found ${#TO_START[@]} exited container(s) with autostart policy: ${TO_START[*]}"
+
+            if [ "$DRY_RUN" = "true" ]; then
+                log_msg "  [DRY RUN] Would start: ${TO_START[*]}"
+            else
+                # First pass: try to start all
+                for name in "${TO_START[@]}"; do
+                    if "$DOCKER_BIN" start "$name" >/dev/null 2>&1; then
+                        log_msg "  - Started: $name"
+                    else
+                        log_msg "  - Failed to start: $name (will retry after delay)"
+                        RETRY_LIST+=("$name")
+                    fi
+                done
+
+                # If any failed, wait for dependencies (e.g. gluetun) to come up, then retry
+                if [ ${#RETRY_LIST[@]} -gt 0 ]; then
+                    log_msg "  Waiting ${AUTOSTART_RETRY_DELAY}s for dependencies to come up before retry..."
+                    sleep "$AUTOSTART_RETRY_DELAY"
+                    for name in "${RETRY_LIST[@]}"; do
+                        if "$DOCKER_BIN" start "$name" >/dev/null 2>&1; then
+                            log_msg "  - Started on retry: $name"
+                        else
+                            log_msg "  [ERROR] Failed to start on retry: $name"
+                            send_failure_webhook "$name" "Container failed to autostart"
+                        fi
+                    done
+                fi
+            fi
+        else
+            log_msg "  No exited containers with autostart policy found."
+        fi
+    else
+        log_msg "  No exited containers found."
+    fi
+    log_msg "Autostart phase complete."
+else
+    log_msg "Autostart: Skipped (AUTOSTART is disabled)"
+fi
+# -------------------------------------------------------------
 
 if [ ${#DOCKER_DIRS[@]} -eq 0 ]; then
     log_msg "[WARNING] No docker compose directories found in $BASE_DIR"
