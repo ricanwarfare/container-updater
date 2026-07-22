@@ -15,6 +15,8 @@ LOCK_FILE="${LOCK_FILE:-$BASE_DIR/container-updater/updater.lock}"
 VERBOSE="${VERBOSE:-false}"
 AUTOSTART="${AUTOSTART:-true}"
 AUTOSTART_RETRY_DELAY="${AUTOSTART_RETRY_DELAY:-10}"
+PULL_RETRIES="${PULL_RETRIES:-3}"
+PULL_RETRY_DELAY="${PULL_RETRY_DELAY:-5}"
 
 EXCLUDED=()
 if [ -n "${EXCLUDE_DIRS:-}" ]; then
@@ -220,8 +222,21 @@ for DIR in "${DOCKER_DIRS[@]}"; do
         log_msg "  [DRY RUN] Would run: $DOCKER_BIN compose -f $DIR/$COMPOSE_FILE pull ${RUNNING_SERVICES[*]}"
     else
         log_msg "  - Pulling images for running services (${RUNNING_SERVICES[*]})..."
-        if ! "$DOCKER_BIN" compose -f "$COMPOSE_FILE" pull "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
-            log_msg "  [ERROR] Failed to pull images in $DIR. Skipping update."
+        PULL_SUCCESS=false
+        for (( attempt=1; attempt<=PULL_RETRIES; attempt++ )); do
+            if "$DOCKER_BIN" compose -f "$COMPOSE_FILE" pull "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
+                PULL_SUCCESS=true
+                break
+            else
+                if [ "$attempt" -lt "$PULL_RETRIES" ]; then
+                    log_msg "  [WARNING] Pull failed on attempt $attempt/$PULL_RETRIES. Retrying in ${PULL_RETRY_DELAY}s..."
+                    sleep "$PULL_RETRY_DELAY"
+                fi
+            fi
+        done
+
+        if [ "$PULL_SUCCESS" = "false" ]; then
+            log_msg "  [ERROR] Failed to pull images in $DIR after $PULL_RETRIES attempts. Skipping update."
             send_failure_webhook "$DIR" "Failed to pull images"
             popd > /dev/null
             continue

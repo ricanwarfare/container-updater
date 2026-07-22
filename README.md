@@ -85,6 +85,14 @@ Prevents overlapping runs by creating a PID-based lock file. If the lock is stal
 LOCK_FILE=/path/to/updater.lock
 ```
 
+**Image Pull Retries**
+Automatically retries `docker compose pull` operations if a transient network or registry rate-limit error (HTTP 429 `toomanyrequests`) occurs:
+```env
+PULL_RETRIES=3
+PULL_RETRY_DELAY=5
+```
+
+
 ### Excluding Folders
 
 If certain directories inside your `BASE_DIR` should never be updated, you can exclude them by setting the `EXCLUDE_DIRS` variable with a colon-separated list of folder names:
