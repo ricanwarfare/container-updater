@@ -17,6 +17,7 @@ AUTOSTART="${AUTOSTART:-true}"
 AUTOSTART_RETRY_DELAY="${AUTOSTART_RETRY_DELAY:-10}"
 PULL_RETRIES="${PULL_RETRIES:-3}"
 PULL_RETRY_DELAY="${PULL_RETRY_DELAY:-5}"
+LOG_MAX_SIZE_KB="${LOG_MAX_SIZE_KB:-0}"
 
 EXCLUDED=()
 if [ -n "${EXCLUDE_DIRS:-}" ]; then
@@ -75,6 +76,19 @@ LOG_DIR=$(dirname "$LOG_FILE")
 if ! mkdir -p "$LOG_DIR"; then
     echo "[FATAL] Failed to create log directory '$LOG_DIR'"
     exit 1
+fi
+
+# Rotate log if it exceeds LOG_MAX_SIZE_KB (0 = disabled)
+if [ "$LOG_MAX_SIZE_KB" -gt 0 ] && [ -f "$LOG_FILE" ]; then
+    LOG_SIZE_KB=$(du -k "$LOG_FILE" 2>/dev/null | cut -f1)
+    if [ -n "$LOG_SIZE_KB" ] && [ "$LOG_SIZE_KB" -gt "$LOG_MAX_SIZE_KB" ]; then
+        ROTATED="${LOG_FILE}.$(date '+%Y%m%d%H%M%S')"
+        mv "$LOG_FILE" "$ROTATED"
+        gzip "$ROTATED" 2>/dev/null || true
+        # Keep only last 5 rotated logs
+        ls -t "${LOG_FILE}".*.gz 2>/dev/null | tail -n +6 | xargs -r rm -f 2>/dev/null || true
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log rotated (was ${LOG_SIZE_KB}KB, max ${LOG_MAX_SIZE_KB}KB)" >> "$LOG_FILE"
+    fi
 fi
 
 log_msg() {
