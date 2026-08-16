@@ -39,17 +39,26 @@ if [ ! -d "$BASE_DIR" ]; then
 fi
 # -----------------------------------------------
 
-if [ -f "$LOCK_FILE" ]; then
-    LOCK_PID=$(cat "$LOCK_FILE")
-    if kill -0 "$LOCK_PID" 2>/dev/null; then
-        echo "[FATAL] Another updater instance is already running (PID $LOCK_PID). Remove $LOCK_FILE if stale."
+# Atomic lock using mkdir (fails if the lock dir already exists — no TOCTOU race).
+LOCK_DIR="${LOCK_FILE}.d"
+mkdir -p "$(dirname "$LOCK_FILE")"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if [ -f "$LOCK_FILE" ]; then
+        LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null)
+        if kill -0 "$LOCK_PID" 2>/dev/null; then
+            echo "[FATAL] Another updater instance is already running (PID $LOCK_PID). Remove $LOCK_DIR if stale."
+            exit 1
+        fi
+        rm -f "$LOCK_FILE"
+    fi
+    # Stale lock — retry once after clearing
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        echo "[FATAL] Could not acquire lock at $LOCK_DIR"
         exit 1
     fi
-    rm -f "$LOCK_FILE"
 fi
-mkdir -p "$(dirname "$LOCK_FILE")"
 echo $$ > "$LOCK_FILE"
-trap 'rm -f "$LOCK_FILE"' EXIT
+trap 'rm -f "$LOCK_FILE"; rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 DOCKER_DIRS=()
 for dir in "$BASE_DIR"/*/ ; do
@@ -103,9 +112,14 @@ send_failure_webhook() {
     local service="$1"
     local error="$2"
     if [ -n "${NOTIFY_FAILURE_WEBHOOK:-}" ]; then
+        # Escape for JSON string context (backslash, quote, control chars) to
+        # prevent JSON injection via service/error values.
+        local esc_service esc_error
+        esc_service=$(printf '%s' "$service" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        esc_error=$(printf '%s' "$error" | sed 's/\\/\\\\/g; s/"/\\"/g')
         curl -s -X POST "$NOTIFY_FAILURE_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "{\"service\":\"$service\",\"error\":\"$error\",\"host\":\"$(hostname)\"}" \
+            -d "{\"service\":\"$esc_service\",\"error\":\"$esc_error\",\"host\":\"$(hostname)\"}" \
             >> "$LOG_FILE" 2>&1 || true
     fi
 }
