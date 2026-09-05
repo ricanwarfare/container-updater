@@ -41,3 +41,16 @@ The legacy `.env` remains tracked to preserve the user's existing installation. 
 ## Remote changes integrated before push
 
 The remote branch gained CLI flags, `.updaterignore`, hooks, summary metrics, success webhooks, CRLF config handling, and Git line-ending rules during the review. These features were retained alongside the fixes. Additional regression coverage checks argument handling, hooks and their failures, ignore files, CRLF configuration, the legacy timeout alias, and successful-run payloads. A zero timeout now selects a bounded 300-second wait instead of an unlimited wait. Remote configuration changes were accepted as part of the merge.
+
+## Post-review production fixes & hardening
+
+1. **Broad Compose V2 compatibility (Synology DSM & Debian LTS)**: Removed `--orphans=false` from `compose ps`, which caused failures on Compose versions prior to v2.24.0. The script now runs cleanly on Synology Container Manager (v2.9/v2.20) as well as modern Compose releases.
+2. **Dependency & sidecar preservation**: Removed `--no-deps` from `compose up` so that Docker Compose properly orders service startup and health checks. This fixes startup crashes in stacks containing VPN sidecars (e.g., Gluetun) and network-mode sharing services.
+3. **Transparent error diagnostics**: Failed Compose commands now capture and display their actual stderr/stdout diagnostics directly on standard output and in webhook alerts rather than burying details in log files.
+4. **Local build support**: Added `--ignore-buildable` to `compose pull` so Compose only pulls registry images and safely skips services built locally from Dockerfiles.
+5. **Interactive defaults**: Enabled standard output by default (`VERBOSE=true`), added real-time step progress feedback, and introduced `-q, --quiet, --no-verbose` options for silent background runs.
+6. **CLI `-e, --exclude DIRS` flag**: Added ad-hoc exclusion support directly via CLI flags.
+7. **Symlink traversal**: Canonical directory resolution allows `updater.sh` to be invoked through global symlinks while reliably discovering `.env`.
+8. **Hook script enhancements**: Stack hooks now execute directly if marked executable (`chmod +x`), with `STACK_NAME`, `STACK_DIR`, and `ACTIVE_SERVICES` exported for backup scripts.
+9. **Git configuration cleanup**: Untracked `.env` from Git history so local server configurations and credentials are never accidentally committed or merged.
+10. **Automated CI pipeline**: Added GitHub Actions workflow (`.github/workflows/ci.yml`) validating Bash syntax, ShellCheck linting, and 34 isolated Python regression tests.

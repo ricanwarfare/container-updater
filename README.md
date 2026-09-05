@@ -18,7 +18,7 @@ chmod +x updater.sh
 cp .env.example .env
 ```
 
-Edit `.env` for your installation. The script sources this file as **trusted Bash code**, so quote paths containing spaces and restrict write access. Existing installations should preserve their own `.env` instead of copying over it. This repository's legacy `.env` is still tracked; `.gitignore` does not untrack it. Avoid putting credentials in that tracked file.
+Edit `.env` for your installation. The script sources this file as **trusted Bash code**, so quote paths containing spaces and restrict write access. The `.env` file is untracked by Git (`.gitignore` protects it); `.env.example` provides portable defaults. Avoid committing credentials or server-specific paths.
 
 CLI options override explicit environment variables, which override `.env`; `.env` overrides defaults:
 
@@ -104,11 +104,13 @@ For Sundays at 3 AM:
 
 Inspect `LOG_FILE` for details, or use `VERBOSE=true` interactively. Exit status can be monitored by a scheduler.
 
-## Development
+## Development & CI
+
+Run syntax verification and the full regression test suite locally:
 
 ```bash
 bash -n updater.sh
 python3 -m unittest discover -s tests -v
 ```
 
-Tests use an isolated fake Docker executable and temporary stacks; they never operate real containers. See [REVIEW.md](REVIEW.md) for the review results, verification limits, and recommended features.
+Automated testing is configured via GitHub Actions in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which automatically validates Bash syntax, runs ShellCheck linting, and executes all 34 regression tests on every push and pull request. See [REVIEW.md](REVIEW.md) for architectural notes, verification details, and review findings.
