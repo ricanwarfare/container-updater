@@ -1,0 +1,6 @@
+.env
+*.log
+*.log.*
+*.lock
+*.lock.d/
+__pycache__/
