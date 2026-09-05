@@ -1,2 +1,6 @@
-# Force shell scripts to use Unix line endings (LF) everywhere
+# Force shell scripts and config files to use Unix line endings (LF) everywhere
 *.sh text eol=lf
+*.env text eol=lf
+.env* text eol=lf
+*.md text eol=lf
+

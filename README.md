@@ -20,13 +20,19 @@ cp .env.example .env
 
 Edit `.env` for your installation. The script sources this file as **trusted Bash code**, so quote paths containing spaces and restrict write access. Existing installations should preserve their own `.env` instead of copying over it. This repository's legacy `.env` is still tracked; `.gitignore` does not untrack it. Avoid putting credentials in that tracked file.
 
-Explicit environment variables override `.env`; `.env` overrides defaults:
+CLI options override explicit environment variables, which override `.env`; `.env` overrides defaults:
 
 ```bash
 BASE_DIR=/opt/containers DRY_RUN=true VERBOSE=true ./updater.sh
 ```
 
 Relative paths resolve from the directory where the updater is invoked. Use absolute paths in cron jobs. Logs and locks are resolved before entering stack directories.
+
+## CLI options and stack hooks
+
+Use `--help` for all options: `--dry-run` (`-d`), `--verbose` (`-v`), `--base-dir DIR` (`-b`), `--prune` (`-p`), `--no-prune`, `--no-autostart`, `--wait-timeout SEC`, and `--no-hooks`.
+
+A `.updaterignore` file inside a stack directory excludes it from updates and autostart. With `RUN_HOOKS=true` (default), trusted `pre-update.sh` and `post-update.sh` files run through Bash inside each active stack. A failed pre-hook skips its update; a failed post-hook marks the run failed. Dry runs only log hooks. Disable them with `--no-hooks` or `RUN_HOOKS=false`.
 
 ## Configuration
 
@@ -46,9 +52,12 @@ Relative paths resolve from the directory where the updater is invoked. Use abso
 | `PULL_RETRY_DELAY` | `5` | Seconds between failed pull attempts |
 | `WAIT_TIMEOUT` | `300` | Maximum seconds for Compose's running/healthy wait, at least 1 |
 | `LOG_MAX_SIZE_KB` | `0` | Rotate above this size at startup; 0 disables rotation; retain five compressed archives |
-| `NOTIFY_FAILURE_WEBHOOK` | empty | Optional endpoint accepting the generic JSON payload below |
+| `NOTIFY_FAILURE_WEBHOOK` | empty | Optional failure notification endpoint |
+| `NOTIFY_SUCCESS_WEBHOOK` | empty | Optional successful-run summary endpoint |
+| `RUN_HOOKS` | `true` | Run trusted pre/post-update scripts |
+| `COMPOSE_WAIT_TIMEOUT` | unset | Legacy alias used when `WAIT_TIMEOUT` is unset |
 
-Booleans accept exactly `true` or `false`. Numeric settings accept nonnegative integers of up to nine digits, with no leading zeros. Dry runs still create logs and acquire locks, and may rotate an existing log.
+Booleans accept exactly `true` or `false`. `--wait-timeout 0` or a zero timeout setting selects the bounded 300-second default. Numeric settings accept nonnegative integers of up to nine digits, with no leading zeros. Dry runs still create logs and acquire locks, and may rotate an existing log.
 
 ## Update behavior
 
@@ -77,7 +86,7 @@ The container must have the label applied by Compose and use `always` or `unless
 
 ### Failure notifications
 
-The endpoint receives `{"service":"...","error":"...","host":"..."}`. JSON strings are escaped, requests have a 10-second connect timeout and 30-second total timeout, and delivery failures are logged. Dry runs do not send notifications. This is a generic webhook format; Slack and Discord require their own payload adapter and are not supported directly.
+Failure payloads include `service`, `error`, and `host`, plus `text` and `content` message fields. Successful-run payloads include `status`, `updated`, `skipped`, `total`, `duration`, `host`, `text`, and `content`. Logs also summarize updated, skipped, planned, and failed operations and elapsed seconds. JSON strings are escaped, requests have a 10-second connect timeout and 30-second total timeout, and delivery failures are logged. Dry runs do not send notifications. The message fields retain the remote version’s Slack/Discord-oriented payload format; endpoint compatibility has not been verified against live services. Other providers may require an adapter.
 
 ### Lock migration
 

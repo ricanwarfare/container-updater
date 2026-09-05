@@ -64,8 +64,8 @@ class UpdaterTests(unittest.TestCase):
                         PULL_RETRY_DELAY='0', AUTOSTART_RETRY_DELAY='0',
                         CALLS=str(self.root / 'calls'))
 
-    def run_updater(self, **env):
-        return subprocess.run(['bash', str(self.root / 'updater.sh')],
+    def run_updater(self, args=(), **env):
+        return subprocess.run(['bash', str(self.root / 'updater.sh'), *args],
                               env={**self.env, **env}, cwd=self.root,
                               capture_output=True, text=True, timeout=10)
 
@@ -217,6 +217,71 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('must be different', result.stderr)
         self.assertFalse(self.calls())
+
+    def test_cli_overrides_configuration(self):
+        result = self.run_updater(args=['--dry-run', '--no-prune', '--wait-timeout', '45'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.calls(('compose', 'pull')))
+        self.assertIn('--wait-timeout 45', (self.root / 'logs/run.log').read_text())
+
+    def test_cli_help_and_errors_need_no_docker(self):
+        self.assertEqual(self.run_updater(args=['--help'], BASE_DIR='/missing').returncode, 0)
+        for args in [['--unknown'], ['--base-dir'], ['--wait-timeout', 'no']]:
+            self.assertEqual(self.run_updater(args=args).returncode, 1)
+        self.assertFalse(self.calls())
+
+    def test_ignore_file_excludes_autostart_and_updates(self):
+        (self.stack / '.updaterignore').touch()
+        self.assertEqual(self.run_updater(AUTOSTART='true').returncode, 0)
+        self.assertFalse(self.calls(('compose', 'ps')))
+
+    def test_hooks_run_and_pre_hook_failure_aborts_update(self):
+        (self.stack / 'pre-update.sh').write_text('touch pre-ran\n')
+        (self.stack / 'post-update.sh').write_text('touch post-ran\n')
+        self.assertEqual(self.run_updater().returncode, 0)
+        self.assertTrue((self.stack / 'pre-ran').exists())
+        self.assertTrue((self.stack / 'post-ran').exists())
+        (self.stack / 'pre-update.sh').write_text('exit 1\n')
+        before = len(self.calls(('compose', 'pull')))
+        self.assertEqual(self.run_updater().returncode, 1)
+        self.assertEqual(len(self.calls(('compose', 'pull'))), before)
+
+    def test_dry_run_and_no_hooks_do_not_execute_hooks(self):
+        (self.stack / 'pre-update.sh').write_text('exit 1\n')
+        (self.stack / 'post-update.sh').write_text('exit 1\n')
+        self.assertEqual(self.run_updater(DRY_RUN='true').returncode, 0)
+        self.assertEqual(self.run_updater(args=['--no-hooks']).returncode, 0)
+
+    def test_post_hook_failure_is_reported(self):
+        (self.stack / 'post-update.sh').write_text('exit 1\n')
+        self.assertEqual(self.run_updater().returncode, 1)
+        self.assertFalse(self.calls(('image',)))
+
+    def test_crlf_config_and_legacy_wait_setting(self):
+        (self.root / '.env').write_bytes(b'COMPOSE_WAIT_TIMEOUT=45\r\n')
+        self.assertEqual(self.run_updater().returncode, 0)
+        args = self.calls(('compose', 'up'))[0]['args']
+        self.assertEqual(args[args.index('--wait-timeout') + 1], '45')
+
+    def test_success_webhook_summary_and_dry_run_suppression(self):
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        curl = bindir / 'curl'
+        curl.write_text('#!/usr/bin/env python3\nimport os, json, sys\n'
+                        'from pathlib import Path\n'
+                        'Path(os.environ["CALLS"]+".success").write_text(json.dumps(sys.argv[1:]))\n')
+        curl.chmod(0o755)
+        config = dict(NOTIFY_SUCCESS_WEBHOOK='https://example.invalid',
+                      PATH=str(bindir) + ':' + self.env['PATH'])
+        self.assertEqual(self.run_updater(DRY_RUN='true', **config).returncode, 0)
+        capture = self.root / 'calls.success'
+        self.assertFalse(capture.exists())
+        self.assertEqual(self.run_updater(**config).returncode, 0)
+        args = json.loads(capture.read_text())
+        payload = json.loads(args[args.index('--data') + 1])
+        self.assertEqual(payload['updated'], 1)
+        self.assertEqual(payload['status'], 'success')
+        self.assertEqual(payload['text'], payload['content'])
 
     def test_rotation_with_spaces_keeps_five_archives(self):
         logs = self.root / 'logs'

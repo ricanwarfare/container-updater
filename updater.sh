@@ -5,13 +5,51 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Explicit caller settings take precedence over the trusted shell config file.
 CONFIG_KEYS=(BASE_DIR LOG_FILE DRY_RUN PRUNE_IMAGES LOCK_FILE VERBOSE AUTOSTART
     AUTOSTART_RETRY_DELAY PULL_RETRIES PULL_RETRY_DELAY LOG_MAX_SIZE_KB
-    EXCLUDE_DIRS DOCKER_BIN NOTIFY_FAILURE_WEBHOOK WAIT_TIMEOUT)
+    EXCLUDE_DIRS DOCKER_BIN NOTIFY_FAILURE_WEBHOOK WAIT_TIMEOUT
+    COMPOSE_WAIT_TIMEOUT RUN_HOOKS NOTIFY_SUCCESS_WEBHOOK)
 declare -A CALLER_CONFIG=()
 for key in "${CONFIG_KEYS[@]}"; do
     if [[ -v $key ]]; then CALLER_CONFIG[$key]="${!key}"; fi
 done
-if [ -f "$SCRIPT_DIR/.env" ]; then source "$SCRIPT_DIR/.env"; fi
+if [ -f "$SCRIPT_DIR/.env" ]; then source <(sed 's/\r$//' "$SCRIPT_DIR/.env"); fi
 for key in "${!CALLER_CONFIG[@]}"; do printf -v "$key" '%s' "${CALLER_CONFIG[$key]}"; done
+
+show_help() {
+    cat <<'HELP'
+Usage: updater.sh [OPTIONS]
+  -d, --dry-run              Inspect and log without mutations
+  -v, --verbose              Print logs to stdout
+  -b, --base-dir DIR         Parent directory of Compose stacks
+  -p, --prune                Enable dangling image pruning
+      --no-prune            Disable image pruning
+      --no-autostart        Disable labelled container recovery
+      --wait-timeout SEC    Health wait timeout (0 uses 300 seconds)
+      --no-hooks            Disable pre/post-update shell hooks
+  -h, --help                 Show this help
+HELP
+}
+# Retain the remote configuration name as an alias. Zero selects the bounded default.
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-${COMPOSE_WAIT_TIMEOUT:-300}}"
+while (( $# > 0 )); do
+    case "$1" in
+        -d|--dry-run) DRY_RUN=true; shift ;;
+        -v|--verbose) VERBOSE=true; shift ;;
+        -p|--prune) PRUNE_IMAGES=true; shift ;;
+        --no-prune) PRUNE_IMAGES=false; shift ;;
+        --no-autostart) AUTOSTART=false; shift ;;
+        --no-hooks) RUN_HOOKS=false; shift ;;
+        -h|--help) show_help; exit 0 ;;
+        -b|--base-dir|--wait-timeout)
+            if (( $# < 2 )) || [[ -z $2 || $2 == --* ]]; then
+                echo "[FATAL] $1 requires an argument" >&2; exit 1
+            fi
+            if [ "$1" = --wait-timeout ]; then WAIT_TIMEOUT=$2; else BASE_DIR=$2; fi
+            shift 2 ;;
+        *) echo "[FATAL] Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+if [ "$WAIT_TIMEOUT" = 0 ]; then WAIT_TIMEOUT=300; fi
+RUN_HOOKS="${RUN_HOOKS:-true}"
 
 BASE_DIR="${BASE_DIR:-$HOME/docker}"
 # Resolve before entering stack directories so relative log/lock paths stay stable.
@@ -31,7 +69,7 @@ PULL_RETRIES="${PULL_RETRIES:-3}"
 PULL_RETRY_DELAY="${PULL_RETRY_DELAY:-5}"
 LOG_MAX_SIZE_KB="${LOG_MAX_SIZE_KB:-0}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"
-for key in DRY_RUN PRUNE_IMAGES VERBOSE AUTOSTART; do
+for key in DRY_RUN PRUNE_IMAGES VERBOSE AUTOSTART RUN_HOOKS; do
     if [[ ${!key} != true && ${!key} != false ]]; then
         echo "[FATAL] $key must be true or false" >&2
         exit 1
@@ -52,7 +90,7 @@ DOCKER_BIN=$(command -v "${DOCKER_BIN:-docker}") || {
 }
 if [[ $DOCKER_BIN != /* ]]; then DOCKER_BIN="$PWD/$DOCKER_BIN"; fi
 command -v flock >/dev/null || { echo "[FATAL] flock is required" >&2; exit 1; }
-if [ -n "${NOTIFY_FAILURE_WEBHOOK:-}" ]; then
+if [ -n "${NOTIFY_FAILURE_WEBHOOK:-}${NOTIFY_SUCCESS_WEBHOOK:-}" ]; then
     command -v curl >/dev/null || { echo "[FATAL] curl is required for webhooks" >&2; exit 1; }
 fi
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$LOCK_FILE")"
@@ -102,18 +140,40 @@ json_string() {
     done
     printf '"'
 }
+send_webhook() {
+    local endpoint="$1" payload="$2"
+    if [ "$DRY_RUN" = false ] && [ -n "$endpoint" ]; then
+        if ! curl --silent --show-error --fail --connect-timeout 10 --max-time 30 \
+            -H 'Content-Type: application/json' --data "$payload" \
+            "$endpoint" >> "$LOG_FILE" 2>&1; then
+            log_msg '[WARNING] Webhook delivery failed'
+        fi
+    fi
+}
+run_hook() {
+    local hook="$1"
+    if [ "$RUN_HOOKS" = true ] && [ -f "$hook" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            log_msg "[DRY RUN] Would execute hook: $hook"
+        elif ! bash "$hook" >> "$LOG_FILE" 2>&1; then
+            fail "$DIR" "$hook failed"
+            return 1
+        fi
+    fi
+}
+START_TIME=$SECONDS
+UPDATED_COUNT=0
+SKIPPED_COUNT=0
+PLANNED_COUNT=0
 FAILURES=0
 fail() {
-    local service="$1" error="$2" payload
+    local service="$1" error="$2" payload message
     FAILURES=$((FAILURES + 1))
     log_msg "[ERROR] $service: $error"
     if [ -n "${NOTIFY_FAILURE_WEBHOOK:-}" ] && [ "$DRY_RUN" = false ]; then
-        payload="{\"service\":$(json_string "$service"),\"error\":$(json_string "$error"),\"host\":$(json_string "$(hostname)")}"
-        if ! curl --silent --show-error --fail --connect-timeout 10 --max-time 30 \
-            -H 'Content-Type: application/json' --data "$payload" \
-            "$NOTIFY_FAILURE_WEBHOOK" >> "$LOG_FILE" 2>&1; then
-            log_msg '[WARNING] Failure webhook delivery failed'
-        fi
+        message=$(json_string "Docker Updater Failure: $service - $error")
+        payload="{\"text\":$message,\"content\":$message,\"service\":$(json_string "$service"),\"error\":$(json_string "$error"),\"host\":$(json_string "$(hostname)")}"
+        send_webhook "$NOTIFY_FAILURE_WEBHOOK" "$payload"
     fi
 }
 log_msg 'Global Update started'
@@ -132,6 +192,7 @@ DOCKER_DIRS=()
 shopt -s nullglob
 for dir in "$BASE_DIR"/*/; do
     dir=${dir%/}
+    if [ -f "$dir/.updaterignore" ]; then continue; fi
     skip=false
     for ex in "${EXCLUDED[@]}"; do
         if [ "${dir##*/}" = "$ex" ]; then skip=true; break; fi
@@ -195,12 +256,16 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     if [ "$STATUS_OK" = false ]; then popd >/dev/null; continue; fi
     if (( ${#RUNNING_SERVICES[@]} == 0 )); then
         log_msg 'No active services; skipping update.'
+        SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
         popd >/dev/null
         continue
     fi
+    if ! run_hook ./pre-update.sh; then popd >/dev/null; continue; fi
     if [ "$DRY_RUN" = true ]; then
         log_msg "[DRY RUN] In $DIR: compose pull ${RUNNING_SERVICES[*]}"
         log_msg "[DRY RUN] In $DIR: compose up -d --no-deps --wait --wait-timeout $WAIT_TIMEOUT ${RUNNING_SERVICES[*]}"
+        run_hook ./post-update.sh
+        PLANNED_COUNT=$((PLANNED_COUNT + 1))
         popd >/dev/null
         continue
     fi
@@ -219,7 +284,10 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     elif ! "$DOCKER_BIN" compose up -d --no-deps --wait --wait-timeout "$WAIT_TIMEOUT" "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
         fail "$DIR" 'Containers failed to start or become healthy'
     else
-        log_msg "Successfully updated $DIR"
+        if run_hook ./post-update.sh; then
+            UPDATED_COUNT=$((UPDATED_COUNT + 1))
+            log_msg "Successfully updated $DIR"
+        fi
     fi
     popd >/dev/null
 done
@@ -231,6 +299,13 @@ if [ "$PRUNE_IMAGES" = true ] && (( ${#DOCKER_DIRS[@]} > 0 && FAILURES == 0 )); 
         fail Docker 'Image pruning failed'
     fi
 fi
+DURATION=$((SECONDS - START_TIME))
+log_msg "Summary: ${#DOCKER_DIRS[@]} stacks, $UPDATED_COUNT updated, $SKIPPED_COUNT skipped, $PLANNED_COUNT planned, $FAILURES failure(s), ${DURATION}s"
 log_msg "Global Update finished: $FAILURES failure(s)"
 if (( FAILURES > 0 )); then exit 1; fi
+if [ -n "${NOTIFY_SUCCESS_WEBHOOK:-}" ] && [ "$DRY_RUN" = false ]; then
+    MESSAGE=$(json_string "Docker Updater Finished: $UPDATED_COUNT/${#DOCKER_DIRS[@]} updated, $SKIPPED_COUNT skipped (${DURATION}s)")
+    PAYLOAD="{\"text\":$MESSAGE,\"content\":$MESSAGE,\"status\":\"success\",\"updated\":$UPDATED_COUNT,\"skipped\":$SKIPPED_COUNT,\"total\":${#DOCKER_DIRS[@]},\"duration\":$DURATION,\"host\":$(json_string "$(hostname)")}"
+    send_webhook "$NOTIFY_SUCCESS_WEBHOOK" "$PAYLOAD"
+fi
 exit 0

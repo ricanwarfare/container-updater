@@ -23,7 +23,7 @@ Reviewed all tracked files: the updater, README, configuration, and Git attribut
 
 ## Verification
 
-`bash -n updater.sh` passes. All 21 isolated Python unittest tests pass. The suite verifies service selection, stderr separation, caller precedence, mutation-free dry runs, retries, failure aggregation, daemon/status failures, pruning failure, exclusions, labelled recovery, invalid configuration, stale and concurrent locks, relative paths, log retention, and JSON payloads containing quotes, backslashes, tabs, and newlines.
+`bash -n updater.sh` passes. All 29 isolated Python unittest tests pass. The suite verifies service selection, stderr separation, caller precedence, mutation-free dry runs, retries, failure aggregation, daemon/status failures, pruning failure, exclusions, labelled recovery, invalid configuration, stale and concurrent locks, relative paths, log retention, and JSON payloads containing quotes, backslashes, tabs, and newlines.
 
 The tests simulate CLI responses and verify issued commands. No live Docker updates were performed. ShellCheck is not installed in this workspace. Real Compose merging, health checks, and replica reconciliation remain integration-test coverage gaps. Docker's official [Compose ps](https://docs.docker.com/reference/cli/docker/compose/ps/) and [Compose up](https://docs.docker.com/reference/cli/docker/compose/up/) references were checked for the flags and behavior used here.
 
@@ -32,8 +32,12 @@ The tests simulate CLI responses and verify issued commands. No live Docker upda
 1. **Disposable Compose integration tests and CI.** Exercise override files, stopped dependencies, health failures, and scaled services against a real daemon, alongside ShellCheck and this regression suite. This would catch CLI/version differences mocks cannot detect.
 2. **Image change previews and update policies.** Show current and candidate digests, allow per-stack approval or maintenance windows, and support an allowlist for unattended updates.
 3. **Rollback support with explicit limits.** Record pre-update image digests and retain them until post-update health checks pass. Make recovery opt-in per stack; image rollback cannot undo database migrations or restore data by itself.
-4. **Structured run reports and native notifications.** Emit machine-readable per-stack results and totals, with Slack/Discord payload adapters and a final summary notification.
+4. **Structured run reports and native notifications.** Emit machine-readable per-stack results and totals, with provider-specific payload validation and delivery monitoring. Basic text/content payloads and successful-run summaries are now retained from the remote version.
 5. **Replica-aware preservation.** Detect partially stopped or paused scaled services and skip/report them, or preserve their intended state explicitly. Compose currently acts on whole services.
 6. **Per-stack configuration.** Support project names, multiple Compose files, profiles, dependencies between stacks, and stack-specific timeouts without relying on globally inherited Compose variables.
 
 The legacy `.env` remains tracked to preserve the user's existing installation. A future configuration migration should untrack it after backing it up; `.env.example` now supplies portable defaults and `.gitignore` prevents newly untracked configuration and runtime files from being added accidentally.
+
+## Remote changes integrated before push
+
+The remote branch gained CLI flags, `.updaterignore`, hooks, summary metrics, success webhooks, CRLF config handling, and Git line-ending rules during the review. These features were retained alongside the fixes. Additional regression coverage checks argument handling, hooks and their failures, ignore files, CRLF configuration, the legacy timeout alias, and successful-run payloads. A zero timeout now selects a bounded 300-second wait instead of an unlimited wait. Remote configuration changes were accepted as part of the merge.
