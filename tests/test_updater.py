@@ -79,7 +79,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         up = self.calls(('compose', 'up'))[0]
         self.assertEqual(up['cwd'], str(self.stack))
-        self.assertEqual(up['args'], ['compose', 'up', '-d', '--no-deps', '--wait',
+        self.assertEqual(up['args'], ['compose', 'up', '-d', '--wait',
                                      '--wait-timeout', '300', 'web', 'worker'])
         self.assertEqual(self.calls(('compose', 'pull'))[0]['args'], ['compose', 'pull', '--ignore-buildable', 'web', 'worker'])
         self.assertTrue((self.root / 'logs/run.log').exists())

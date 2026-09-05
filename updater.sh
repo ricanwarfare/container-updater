@@ -299,7 +299,7 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     if ! run_hook ./pre-update.sh; then popd >/dev/null; continue; fi
     if [ "$DRY_RUN" = true ]; then
         log_msg "[DRY RUN] In $DIR: compose pull --ignore-buildable ${RUNNING_SERVICES[*]}"
-        log_msg "[DRY RUN] In $DIR: compose up -d --no-deps --wait --wait-timeout $WAIT_TIMEOUT ${RUNNING_SERVICES[*]}"
+        log_msg "[DRY RUN] In $DIR: compose up -d --wait --wait-timeout $WAIT_TIMEOUT ${RUNNING_SERVICES[*]}"
         run_hook ./post-update.sh
         PLANNED_COUNT=$((PLANNED_COUNT + 1))
         popd >/dev/null
@@ -320,9 +320,15 @@ for DIR in "${DOCKER_DIRS[@]}"; do
         fail "$DIR" "Failed to pull images after $PULL_RETRIES attempts"
     else
         log_msg "Recreating containers with health wait: ${RUNNING_SERVICES[*]}"
-        if ! "$DOCKER_BIN" compose up -d --no-deps --wait --wait-timeout "$WAIT_TIMEOUT" "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
-            fail "$DIR" 'Containers failed to start or become healthy'
+        UP_ERR_FILE=$(mktemp)
+        if ! "$DOCKER_BIN" compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" "${RUNNING_SERVICES[@]}" >"$UP_ERR_FILE" 2>&1; then
+            UP_ERR=$(tr '\r\n' ' ' < "$UP_ERR_FILE" 2>/dev/null || true)
+            cat "$UP_ERR_FILE" >> "$LOG_FILE"
+            rm -f "$UP_ERR_FILE"
+            fail "$DIR" "Containers failed to start or become healthy${UP_ERR:+: $UP_ERR}"
         else
+            cat "$UP_ERR_FILE" >> "$LOG_FILE"
+            rm -f "$UP_ERR_FILE"
             if run_hook ./post-update.sh; then
                 UPDATED_COUNT=$((UPDATED_COUNT + 1))
                 log_msg "Successfully updated $DIR"
