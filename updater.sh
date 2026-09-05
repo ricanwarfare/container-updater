@@ -237,7 +237,7 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     if ! pushd "$DIR" >/dev/null; then fail "$DIR" 'Cannot enter stack directory'; continue; fi
     # Let Compose resolve its canonical filename and automatic override files.
     if [ "$AUTOSTART" = true ]; then
-        if EXITED=$("$DOCKER_BIN" compose ps --all --orphans=false --status exited --format '{{.Name}}' 2>>"$LOG_FILE"); then
+        if EXITED=$("$DOCKER_BIN" compose ps --all --status exited --format '{{.Name}}' 2>>"$LOG_FILE"); then
             RETRY_LIST=()
             while IFS= read -r name; do
                 [ -z "$name" ] && continue
@@ -267,7 +267,10 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     STATUS_OK=true
     # Query separately for compatibility across Compose versions; stderr is not a service.
     for status in running restarting; do
-        if PS_OUTPUT=$("$DOCKER_BIN" compose ps --all --orphans=false --services --status "$status" 2>>"$LOG_FILE"); then
+        PS_ERR_FILE=$(mktemp)
+        if PS_OUTPUT=$("$DOCKER_BIN" compose ps --all --services --status "$status" 2>"$PS_ERR_FILE"); then
+            cat "$PS_ERR_FILE" >> "$LOG_FILE"
+            rm -f "$PS_ERR_FILE"
             while IFS= read -r service; do
                 [ -z "$service" ] && continue
                 found=false
@@ -277,7 +280,10 @@ for DIR in "${DOCKER_DIRS[@]}"; do
                 if [ "$found" = false ]; then RUNNING_SERVICES+=("$service"); fi
             done <<< "$PS_OUTPUT"
         else
-            fail "$DIR" "Failed to check $status service status"
+            PS_ERR=$(tr '\r\n' ' ' < "$PS_ERR_FILE" 2>/dev/null || true)
+            rm -f "$PS_ERR_FILE"
+            [ -n "$PS_ERR" ] && printf '%s\n' "$PS_ERR" >> "$LOG_FILE"
+            fail "$DIR" "Failed to check $status service status${PS_ERR:+: $PS_ERR}"
             STATUS_OK=false
             break
         fi

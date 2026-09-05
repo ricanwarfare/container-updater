@@ -5,7 +5,7 @@ A Bash utility that discovers Docker Compose stacks in the immediate subdirector
 ## Requirements
 
 - Linux with Bash 4.3+, `flock` (util-linux), and standard utilities (`gzip` for compressed log rotation).
-- Docker with access to its daemon, and the Compose V2 plugin supporting `up --wait --wait-timeout` and `ps --orphans`.
+- Docker with access to its daemon, and the Compose V2 plugin supporting `up --wait --wait-timeout`.
 - `curl` if failure webhooks are enabled.
 - Python 3 only to run the regression tests.
 
