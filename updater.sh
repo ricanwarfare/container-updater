@@ -140,7 +140,8 @@ if (( LOG_MAX_SIZE_KB > 0 )) && [ -f "$LOG_FILE" ]; then
     fi
 fi
 log_msg() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    local msg
+    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
     printf '%s\n' "$msg" >> "$LOG_FILE"
     if [ "$VERBOSE" = true ]; then printf '%s\n' "$msg"; fi
 }
@@ -151,7 +152,7 @@ json_string() {
         char=${value:i:1}
         case "$char" in
             '"') printf '\\"' ;;
-            '\') printf '\\\\' ;;
+            "\\") printf '\\\\' ;;
             *) printf -v code '%d' "'$char"
                if (( code < 32 )); then printf '\\u%04x' "$code"; else printf '%s' "$char"; fi ;;
         esac
