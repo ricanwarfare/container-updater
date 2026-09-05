@@ -30,9 +30,9 @@ Relative paths resolve from the directory where the updater is invoked. Use abso
 
 ## CLI options and stack hooks
 
-Use `--help` for all options: `--dry-run` (`-d`), `--verbose` (`-v`), `--base-dir DIR` (`-b`), `--prune` (`-p`), `--no-prune`, `--no-autostart`, `--wait-timeout SEC`, and `--no-hooks`.
+Use `--help` for all options: `--dry-run` (`-d`), `--verbose` (`-v`), `--quiet` / `--no-verbose` (`-q`), `--base-dir DIR` (`-b`), `--exclude DIRS` (`-e`), `--prune` (`-p`), `--no-prune`, `--no-autostart`, `--wait-timeout SEC`, and `--no-hooks`.
 
-A `.updaterignore` file inside a stack directory excludes it from updates and autostart. With `RUN_HOOKS=true` (default), trusted `pre-update.sh` and `post-update.sh` files run through Bash inside each active stack. A failed pre-hook skips its update; a failed post-hook marks the run failed. Dry runs only log hooks. Disable them with `--no-hooks` or `RUN_HOOKS=false`.
+A `.updaterignore` file inside a stack directory excludes it from updates and autostart. With `RUN_HOOKS=true` (default), trusted `pre-update.sh` and `post-update.sh` files run inside each active stack (executed directly if marked executable, or via Bash otherwise). Context variables `STACK_NAME`, `STACK_DIR`, and `ACTIVE_SERVICES` are exported for hook scripts. A failed pre-hook skips its update; a failed post-hook marks the run failed. Dry runs only log hooks. Disable them with `--no-hooks` or `RUN_HOOKS=false`.
 
 ## Configuration
 
@@ -44,7 +44,7 @@ A `.updaterignore` file inside a stack directory excludes it from updates and au
 | `LOG_FILE` | `$BASE_DIR/container-updater/updater.log` | Append-only run log |
 | `LOCK_FILE` | `$BASE_DIR/container-updater/updater.lock` | Persistent file used for a kernel lock |
 | `DRY_RUN` | `false` | Inspect and log proposed actions without Docker mutations or webhooks |
-| `VERBOSE` | `false` | Also print log messages to the console |
+| `VERBOSE` | `true` | Print log messages to standard output in addition to the log file |
 | `PRUNE_IMAGES` | `true` | Prune host-wide dangling images after a failure-free run with discovered stacks |
 | `AUTOSTART` | `false` | Recover explicitly labelled exited containers in included stacks |
 | `AUTOSTART_RETRY_DELAY` | `10` | Seconds before one retry of failed starts |
@@ -63,7 +63,7 @@ Booleans accept exactly `true` or `false`. `--wait-timeout 0` or a zero timeout 
 
 The scanner recognizes `compose.yaml`, `compose.yml`, `docker-compose.yaml`, and `docker-compose.yml`. Commands run inside each stack directory, leaving filename precedence, automatic override files, and stack `.env` settings to Compose. Inherited Compose settings such as `COMPOSE_FILE` and `COMPOSE_PROJECT_NAME` still apply; avoid setting these globally unless that is intended for every stack.
 
-Only running or restarting services are selected. Paused-only and stopped-only services are skipped. `up --no-deps` avoids starting stopped dependencies, and orphan containers are neither selected nor removed. Compose applies the current configuration as well as new images. Updates happen at **service granularity**: if a scaled service has a mix of active and stopped/paused replicas, Compose may reconcile all its replicas. Exclude such stacks if individual replica states must be preserved.
+Only running or restarting services are selected. Paused-only and stopped-only services are skipped. Image pulls use `--ignore-buildable` to safely skip locally-built services. `up --no-deps` avoids starting stopped dependencies, and orphan containers are neither selected nor removed. Compose applies the current configuration as well as new images. Updates happen at **service granularity**: if a scaled service has a mix of active and stopped/paused replicas, Compose may reconcile all its replicas. Exclude such stacks if individual replica states must be preserved.
 
 A failed pull skips recreation for that stack. Status, autostart, pull, startup, and pruning failures are logged and result in exit code 1; other stacks continue where possible. Pruning is skipped after failures. Docker/Compose preflight failures stop the run. Success, including no eligible stacks, returns 0. Interrupts use exit codes 130/143.
 

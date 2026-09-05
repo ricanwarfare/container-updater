@@ -1,7 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 # Explicit caller settings take precedence over the trusted shell config file.
 CONFIG_KEYS=(BASE_DIR LOG_FILE DRY_RUN PRUNE_IMAGES LOCK_FILE VERBOSE AUTOSTART
     AUTOSTART_RETRY_DELAY PULL_RETRIES PULL_RETRY_DELAY LOG_MAX_SIZE_KB
@@ -11,15 +17,20 @@ declare -A CALLER_CONFIG=()
 for key in "${CONFIG_KEYS[@]}"; do
     if [[ -v $key ]]; then CALLER_CONFIG[$key]="${!key}"; fi
 done
-if [ -f "$SCRIPT_DIR/.env" ]; then source <(sed 's/\r$//' "$SCRIPT_DIR/.env"); fi
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    # shellcheck disable=SC1090
+    source <(sed 's/\r$//' "$SCRIPT_DIR/.env")
+fi
 for key in "${!CALLER_CONFIG[@]}"; do printf -v "$key" '%s' "${CALLER_CONFIG[$key]}"; done
 
 show_help() {
     cat <<'HELP'
 Usage: updater.sh [OPTIONS]
   -d, --dry-run              Inspect and log without mutations
-  -v, --verbose              Print logs to stdout
+  -v, --verbose              Print logs to stdout (default: enabled)
+  -q, --quiet, --no-verbose  Suppress logs to stdout (log file only)
   -b, --base-dir DIR         Parent directory of Compose stacks
+  -e, --exclude DIRS         Colon-separated directory names to skip
   -p, --prune                Enable dangling image pruning
       --no-prune            Disable image pruning
       --no-autostart        Disable labelled container recovery
@@ -34,11 +45,18 @@ while (( $# > 0 )); do
     case "$1" in
         -d|--dry-run) DRY_RUN=true; shift ;;
         -v|--verbose) VERBOSE=true; shift ;;
+        -q|--quiet|--no-verbose) VERBOSE=false; shift ;;
         -p|--prune) PRUNE_IMAGES=true; shift ;;
         --no-prune) PRUNE_IMAGES=false; shift ;;
         --no-autostart) AUTOSTART=false; shift ;;
         --no-hooks) RUN_HOOKS=false; shift ;;
         -h|--help) show_help; exit 0 ;;
+        -e|--exclude)
+            if (( $# < 2 )) || [[ -z $2 || $2 == --* ]]; then
+                echo "[FATAL] $1 requires an argument" >&2; exit 1
+            fi
+            EXCLUDE_DIRS=$2
+            shift 2 ;;
         -b|--base-dir|--wait-timeout)
             if (( $# < 2 )) || [[ -z $2 || $2 == --* ]]; then
                 echo "[FATAL] $1 requires an argument" >&2; exit 1
@@ -62,7 +80,7 @@ LOG_FILE="${LOG_FILE:-$BASE_DIR/container-updater/updater.log}"
 LOCK_FILE="${LOCK_FILE:-$BASE_DIR/container-updater/updater.lock}"
 DRY_RUN="${DRY_RUN:-false}"
 PRUNE_IMAGES="${PRUNE_IMAGES:-true}"
-VERBOSE="${VERBOSE:-false}"
+VERBOSE="${VERBOSE:-true}"
 AUTOSTART="${AUTOSTART:-false}"
 AUTOSTART_RETRY_DELAY="${AUTOSTART_RETRY_DELAY:-10}"
 PULL_RETRIES="${PULL_RETRIES:-3}"
@@ -155,9 +173,20 @@ run_hook() {
     if [ "$RUN_HOOKS" = true ] && [ -f "$hook" ]; then
         if [ "$DRY_RUN" = true ]; then
             log_msg "[DRY RUN] Would execute hook: $hook"
-        elif ! bash "$hook" >> "$LOG_FILE" 2>&1; then
-            fail "$DIR" "$hook failed"
-            return 1
+        else
+            export STACK_NAME="${DIR##*/}"
+            export STACK_DIR="$DIR"
+            export ACTIVE_SERVICES="${RUNNING_SERVICES[*]:-}"
+            local hook_failed=false
+            if [ -x "$hook" ]; then
+                "$hook" >> "$LOG_FILE" 2>&1 || hook_failed=true
+            else
+                bash "$hook" >> "$LOG_FILE" 2>&1 || hook_failed=true
+            fi
+            if [ "$hook_failed" = true ]; then
+                fail "$DIR" "$hook failed"
+                return 1
+            fi
         fi
     fi
 }
@@ -262,16 +291,17 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     fi
     if ! run_hook ./pre-update.sh; then popd >/dev/null; continue; fi
     if [ "$DRY_RUN" = true ]; then
-        log_msg "[DRY RUN] In $DIR: compose pull ${RUNNING_SERVICES[*]}"
+        log_msg "[DRY RUN] In $DIR: compose pull --ignore-buildable ${RUNNING_SERVICES[*]}"
         log_msg "[DRY RUN] In $DIR: compose up -d --no-deps --wait --wait-timeout $WAIT_TIMEOUT ${RUNNING_SERVICES[*]}"
         run_hook ./post-update.sh
         PLANNED_COUNT=$((PLANNED_COUNT + 1))
         popd >/dev/null
         continue
     fi
+    log_msg "Pulling images for: ${RUNNING_SERVICES[*]}"
     PULL_SUCCESS=false
     for (( attempt=1; attempt<=PULL_RETRIES; attempt++ )); do
-        if "$DOCKER_BIN" compose pull "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
+        if "$DOCKER_BIN" compose pull --ignore-buildable "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
             PULL_SUCCESS=true
             break
         elif (( attempt < PULL_RETRIES )); then
@@ -281,12 +311,15 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     done
     if [ "$PULL_SUCCESS" = false ]; then
         fail "$DIR" "Failed to pull images after $PULL_RETRIES attempts"
-    elif ! "$DOCKER_BIN" compose up -d --no-deps --wait --wait-timeout "$WAIT_TIMEOUT" "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
-        fail "$DIR" 'Containers failed to start or become healthy'
     else
-        if run_hook ./post-update.sh; then
-            UPDATED_COUNT=$((UPDATED_COUNT + 1))
-            log_msg "Successfully updated $DIR"
+        log_msg "Recreating containers with health wait: ${RUNNING_SERVICES[*]}"
+        if ! "$DOCKER_BIN" compose up -d --no-deps --wait --wait-timeout "$WAIT_TIMEOUT" "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
+            fail "$DIR" 'Containers failed to start or become healthy'
+        else
+            if run_hook ./post-update.sh; then
+                UPDATED_COUNT=$((UPDATED_COUNT + 1))
+                log_msg "Successfully updated $DIR"
+            fi
         fi
     fi
     popd >/dev/null
@@ -295,8 +328,11 @@ if (( ${#DOCKER_DIRS[@]} == 0 )); then log_msg "No Compose directories found in 
 if [ "$PRUNE_IMAGES" = true ] && (( ${#DOCKER_DIRS[@]} > 0 && FAILURES == 0 )); then
     if [ "$DRY_RUN" = true ]; then
         log_msg '[DRY RUN] Would run: docker image prune -f'
-    elif ! "$DOCKER_BIN" image prune -f >> "$LOG_FILE" 2>&1; then
-        fail Docker 'Image pruning failed'
+    else
+        log_msg 'Pruning dangling images...'
+        if ! "$DOCKER_BIN" image prune -f >> "$LOG_FILE" 2>&1; then
+            fail Docker 'Image pruning failed'
+        fi
     fi
 fi
 DURATION=$((SECONDS - START_TIME))

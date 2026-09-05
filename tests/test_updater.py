@@ -81,7 +81,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(up['cwd'], str(self.stack))
         self.assertEqual(up['args'], ['compose', 'up', '-d', '--no-deps', '--wait',
                                      '--wait-timeout', '300', 'web', 'worker'])
-        self.assertEqual(self.calls(('compose', 'pull'))[0]['args'], ['compose', 'pull', 'web', 'worker'])
+        self.assertEqual(self.calls(('compose', 'pull'))[0]['args'], ['compose', 'pull', '--ignore-buildable', 'web', 'worker'])
         self.assertTrue((self.root / 'logs/run.log').exists())
         self.assertFalse((self.stack / 'logs').exists())
 
@@ -224,6 +224,17 @@ class UpdaterTests(unittest.TestCase):
         self.assertFalse(self.calls(('compose', 'pull')))
         self.assertIn('--wait-timeout 45', (self.root / 'logs/run.log').read_text())
 
+    def test_stdout_enabled_by_default_and_quiet_suppresses(self):
+        result_default = self.run_updater()
+        self.assertEqual(result_default.returncode, 0)
+        self.assertIn('Global Update started', result_default.stdout)
+        result_quiet = self.run_updater(args=['-q'])
+        self.assertEqual(result_quiet.returncode, 0)
+        self.assertEqual(result_quiet.stdout, '')
+        result_no_verbose = self.run_updater(args=['--no-verbose'])
+        self.assertEqual(result_no_verbose.returncode, 0)
+        self.assertEqual(result_no_verbose.stdout, '')
+
     def test_cli_help_and_errors_need_no_docker(self):
         self.assertEqual(self.run_updater(args=['--help'], BASE_DIR='/missing').returncode, 0)
         for args in [['--unknown'], ['--base-dir'], ['--wait-timeout', 'no']]:
@@ -256,6 +267,41 @@ class UpdaterTests(unittest.TestCase):
         (self.stack / 'post-update.sh').write_text('exit 1\n')
         self.assertEqual(self.run_updater().returncode, 1)
         self.assertFalse(self.calls(('image',)))
+
+    def test_cli_exclude_flag_skips_stacks(self):
+        other = self.base / 'other'
+        other.mkdir()
+        (other / 'compose.yaml').write_text('services: {}\n')
+        self.assertEqual(self.run_updater(args=['-e', 'app']).returncode, 0)
+        ups = self.calls(('compose', 'up'))
+        self.assertEqual(len(ups), 1)
+        self.assertEqual(ups[0]['cwd'], str(other))
+
+    def test_symlinked_script_resolves_env(self):
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        symlink = bindir / 'updater.sh'
+        symlink.symlink_to(self.root / 'updater.sh')
+        (self.root / '.env').write_text('WAIT_TIMEOUT=75\n')
+        res = subprocess.run(['bash', str(symlink)],
+                             env=self.env, cwd=bindir,
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        up = self.calls(('compose', 'up'))[0]
+        self.assertEqual(up['args'][up['args'].index('--wait-timeout') + 1], '75')
+
+    def test_hook_receives_stack_environment_context(self):
+        (self.stack / 'pre-update.sh').write_text('echo "$STACK_NAME|$STACK_DIR|$ACTIVE_SERVICES" > hook_out\n')
+        self.assertEqual(self.run_updater().returncode, 0)
+        out = (self.stack / 'hook_out').read_text().strip()
+        self.assertEqual(out, f'app|{self.stack}|web')
+
+    def test_executable_hook_runs_directly(self):
+        hook = self.stack / 'pre-update.sh'
+        hook.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\nPath("py_hook_ran").touch()\n')
+        hook.chmod(0o755)
+        self.assertEqual(self.run_updater().returncode, 0)
+        self.assertTrue((self.stack / 'py_hook_ran').exists())
 
     def test_crlf_config_and_legacy_wait_setting(self):
         (self.root / '.env').write_bytes(b'COMPOSE_WAIT_TIMEOUT=45\r\n')
