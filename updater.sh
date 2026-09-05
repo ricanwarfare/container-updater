@@ -152,7 +152,7 @@ json_string() {
         char=${value:i:1}
         case "$char" in
             '"') printf '\\"' ;;
-            "\\") printf '\\\\' ;;
+            "\\") printf '%s' "\\\\" ;;
             *) printf -v code '%d' "'$char"
                if (( code < 32 )); then printf '\\u%04x' "$code"; else printf '%s' "$char"; fi ;;
         esac
