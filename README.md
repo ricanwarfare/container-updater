@@ -113,4 +113,4 @@ bash -n updater.sh
 python3 -m unittest discover -s tests -v
 ```
 
-Automated testing is configured via GitHub Actions in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which automatically validates Bash syntax, runs ShellCheck linting, and executes all 34 regression tests on every push and pull request. See [REVIEW.md](REVIEW.md) for architectural notes, verification details, and review findings.
+Automated testing is configured via GitHub Actions in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which automatically validates Bash syntax, runs ShellCheck linting, and executes all 34 regression tests on every push and pull request.
