@@ -18,7 +18,7 @@ chmod +x updater.sh
 cp .env.example .env
 ```
 
-Edit `.env` for your installation. The script sources this file as **trusted Bash code**, so quote paths containing spaces and restrict write access. The `.env` file is untracked by Git (`.gitignore` protects it); `.env.example` provides portable defaults. Avoid committing credentials or server-specific paths.
+For the common `$HOME/docker/<stack>` layout, the copied `.env` works as-is. Change `BASE_DIR` only when your Compose stacks live elsewhere. The script sources this file as **trusted Bash code**, so quote paths containing spaces and restrict write access. The `.env` file is untracked by Git (`.gitignore` protects it); `.env.example` provides portable defaults. Avoid committing credentials or server-specific paths.
 
 CLI options override explicit environment variables, which override `.env`; `.env` overrides defaults:
 
