@@ -12,7 +12,8 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 CONFIG_KEYS=(BASE_DIR LOG_FILE DRY_RUN PRUNE_IMAGES LOCK_FILE VERBOSE AUTOSTART
     AUTOSTART_RETRY_DELAY PULL_RETRIES PULL_RETRY_DELAY LOG_MAX_SIZE_KB
     EXCLUDE_DIRS DOCKER_BIN NOTIFY_FAILURE_WEBHOOK WAIT_TIMEOUT
-    COMPOSE_WAIT_TIMEOUT RUN_HOOKS NOTIFY_SUCCESS_WEBHOOK)
+    COMPOSE_WAIT_TIMEOUT RUN_HOOKS NOTIFY_SUCCESS_WEBHOOK
+    STACK_TIMEOUT LOCK_STALE_SECONDS)
 declare -A CALLER_CONFIG=()
 for key in "${CONFIG_KEYS[@]}"; do
     if [[ -v $key ]]; then CALLER_CONFIG[$key]="${!key}"; fi
@@ -35,6 +36,7 @@ Usage: updater.sh [OPTIONS]
       --no-prune            Disable image pruning
       --no-autostart        Disable labelled container recovery
       --wait-timeout SEC    Health wait timeout (0 uses 300 seconds)
+      --stack-timeout SEC   Hard cap on one stack's Docker calls (0 disables, default 1800)
       --no-hooks            Disable pre/post-update shell hooks
   -h, --help                 Show this help
 HELP
@@ -57,11 +59,15 @@ while (( $# > 0 )); do
             fi
             EXCLUDE_DIRS=$2
             shift 2 ;;
-        -b|--base-dir|--wait-timeout)
+        -b|--base-dir|--wait-timeout|--stack-timeout)
             if (( $# < 2 )) || [[ -z $2 || $2 == --* ]]; then
                 echo "[FATAL] $1 requires an argument" >&2; exit 1
             fi
-            if [ "$1" = --wait-timeout ]; then WAIT_TIMEOUT=$2; else BASE_DIR=$2; fi
+            case "$1" in
+                -b|--base-dir) BASE_DIR=$2 ;;
+                --wait-timeout) WAIT_TIMEOUT=$2 ;;
+                --stack-timeout) STACK_TIMEOUT=$2 ;;
+            esac
             shift 2 ;;
         *) echo "[FATAL] Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -87,13 +93,16 @@ PULL_RETRIES="${PULL_RETRIES:-3}"
 PULL_RETRY_DELAY="${PULL_RETRY_DELAY:-5}"
 LOG_MAX_SIZE_KB="${LOG_MAX_SIZE_KB:-0}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"
+STACK_TIMEOUT="${STACK_TIMEOUT:-1800}"
+LOCK_STALE_SECONDS="${LOCK_STALE_SECONDS:-0}"
 for key in DRY_RUN PRUNE_IMAGES VERBOSE AUTOSTART RUN_HOOKS; do
     if [[ ${!key} != true && ${!key} != false ]]; then
         echo "[FATAL] $key must be true or false" >&2
         exit 1
     fi
 done
-for key in AUTOSTART_RETRY_DELAY PULL_RETRIES PULL_RETRY_DELAY LOG_MAX_SIZE_KB WAIT_TIMEOUT; do
+for key in AUTOSTART_RETRY_DELAY PULL_RETRIES PULL_RETRY_DELAY LOG_MAX_SIZE_KB WAIT_TIMEOUT \
+    STACK_TIMEOUT LOCK_STALE_SECONDS; do
     if [[ ! ${!key} =~ ^(0|[1-9][0-9]{0,8})$ ]]; then
         echo "[FATAL] $key must be a nonnegative integer (at most 9 digits)" >&2
         exit 1
@@ -108,6 +117,9 @@ DOCKER_BIN=$(command -v "${DOCKER_BIN:-docker}") || {
 }
 if [[ $DOCKER_BIN != /* ]]; then DOCKER_BIN="$PWD/$DOCKER_BIN"; fi
 command -v flock >/dev/null || { echo "[FATAL] flock is required" >&2; exit 1; }
+if (( STACK_TIMEOUT > 0 )); then
+    command -v timeout >/dev/null || { echo "[FATAL] timeout is required when STACK_TIMEOUT is set" >&2; exit 1; }
+fi
 if [ -n "${NOTIFY_FAILURE_WEBHOOK:-}${NOTIFY_SUCCESS_WEBHOOK:-}" ]; then
     command -v curl >/dev/null || { echo "[FATAL] curl is required for webhooks" >&2; exit 1; }
 fi
@@ -122,6 +134,20 @@ fi
 exec 9>>"$LOCK_FILE"
 if ! flock -n 9; then
     echo "[FATAL] Another updater instance is already running" >&2
+    if (( LOCK_STALE_SECONDS > 0 )); then
+        # A wedged run holds this lock indefinitely and every scheduled tick then
+        # no-ops, so a stack can stay down for days. Report the age loudly enough
+        # that the skipped-run log line is diagnosable instead of silent.
+        LOCK_MTIME=$(stat -c %Y "$LOCK_FILE" 2>/dev/null || stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0)
+        if (( LOCK_MTIME > 0 )); then
+            LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
+            if (( LOCK_AGE >= LOCK_STALE_SECONDS )); then
+                STALE_MSG="[ERROR] Lock held for ${LOCK_AGE}s (>= LOCK_STALE_SECONDS=${LOCK_STALE_SECONDS}); the previous run is likely wedged on a Docker call and is blocking all updates. Check 'ps -eo pid,etime,args | grep updater.sh' and ${LOG_FILE}."
+                printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$STALE_MSG" >> "$LOG_FILE"
+                echo "$STALE_MSG" >&2
+            fi
+        fi
+    fi
     exit 1
 fi
 trap 'exit 130' INT
@@ -196,6 +222,21 @@ UPDATED_COUNT=0
 SKIPPED_COUNT=0
 PLANNED_COUNT=0
 FAILURES=0
+# Bound a Docker/recreate call so one wedged socket call cannot strand this run
+# (and its lock) for days. Exit 124 from timeout means the cap was hit.
+bounded() {
+    if (( STACK_TIMEOUT > 0 )); then
+        timeout --kill-after=30 --signal=TERM "$STACK_TIMEOUT" "$@"
+    else
+        "$@"
+    fi
+}
+timeout_hint() {
+    # Translate a 124/137 exit into an explicit, diagnosable message.
+    if (( STACK_TIMEOUT > 0 )); then
+        printf ' (hit STACK_TIMEOUT=%ss; the Docker call likely hung)' "$STACK_TIMEOUT"
+    fi
+}
 fail() {
     local service="$1" error="$2" payload message
     FAILURES=$((FAILURES + 1))
@@ -238,25 +279,25 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     if ! pushd "$DIR" >/dev/null; then fail "$DIR" 'Cannot enter stack directory'; continue; fi
     # Let Compose resolve its canonical filename and automatic override files.
     if [ "$AUTOSTART" = true ]; then
-        if EXITED=$("$DOCKER_BIN" compose ps --all --status exited --format '{{.Name}}' 2>>"$LOG_FILE"); then
+        if EXITED=$(bounded "$DOCKER_BIN" compose ps --all --status exited --format '{{.Name}}' 2>>"$LOG_FILE"); then
             RETRY_LIST=()
             while IFS= read -r name; do
                 [ -z "$name" ] && continue
-                if ! DETAILS=$("$DOCKER_BIN" inspect --format '{{.HostConfig.RestartPolicy.Name}}|{{index .Config.Labels "container-updater.autostart"}}' "$name" 2>>"$LOG_FILE"); then
+                if ! DETAILS=$(bounded "$DOCKER_BIN" inspect --format '{{.HostConfig.RestartPolicy.Name}}|{{index .Config.Labels "container-updater.autostart"}}' "$name" 2>>"$LOG_FILE"); then
                     fail "$name" 'Cannot inspect autostart eligibility'; continue
                 fi
                 # Restart policy alone cannot distinguish an intentional stop.
                 if [[ $DETAILS != 'always|true' && $DETAILS != 'unless-stopped|true' ]]; then continue; fi
                 if [ "$DRY_RUN" = true ]; then
                     log_msg "[DRY RUN] Would start: $name"
-                elif ! "$DOCKER_BIN" start "$name" >> "$LOG_FILE" 2>&1; then
+                elif ! bounded "$DOCKER_BIN" start "$name" >> "$LOG_FILE" 2>&1; then
                     RETRY_LIST+=("$name")
                 fi
             done <<< "$EXITED"
             if (( ${#RETRY_LIST[@]} > 0 )); then
                 sleep "$AUTOSTART_RETRY_DELAY"
                 for name in "${RETRY_LIST[@]}"; do
-                    if ! "$DOCKER_BIN" start "$name" >> "$LOG_FILE" 2>&1; then fail "$name" 'Container failed to autostart'; fi
+                    if ! bounded "$DOCKER_BIN" start "$name" >> "$LOG_FILE" 2>&1; then fail "$name" 'Container failed to autostart'; fi
                 done
             fi
         else
@@ -269,7 +310,7 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     # Query separately for compatibility across Compose versions; stderr is not a service.
     for status in running restarting; do
         PS_ERR_FILE=$(mktemp)
-        if PS_OUTPUT=$("$DOCKER_BIN" compose ps --all --services --status "$status" 2>"$PS_ERR_FILE"); then
+        if PS_OUTPUT=$(bounded "$DOCKER_BIN" compose ps --all --services --status "$status" 2>"$PS_ERR_FILE"); then
             cat "$PS_ERR_FILE" >> "$LOG_FILE"
             rm -f "$PS_ERR_FILE"
             while IFS= read -r service; do
@@ -308,7 +349,7 @@ for DIR in "${DOCKER_DIRS[@]}"; do
     log_msg "Pulling images for: ${RUNNING_SERVICES[*]}"
     PULL_SUCCESS=false
     for (( attempt=1; attempt<=PULL_RETRIES; attempt++ )); do
-        if "$DOCKER_BIN" compose pull --ignore-buildable "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
+        if bounded "$DOCKER_BIN" compose pull --ignore-buildable "${RUNNING_SERVICES[@]}" >> "$LOG_FILE" 2>&1; then
             PULL_SUCCESS=true
             break
         elif (( attempt < PULL_RETRIES )); then
@@ -317,15 +358,15 @@ for DIR in "${DOCKER_DIRS[@]}"; do
         fi
     done
     if [ "$PULL_SUCCESS" = false ]; then
-        fail "$DIR" "Failed to pull images after $PULL_RETRIES attempts"
+        fail "$DIR" "Failed to pull images after $PULL_RETRIES attempts$(timeout_hint)"
     else
         log_msg "Recreating containers with health wait: ${RUNNING_SERVICES[*]}"
         UP_ERR_FILE=$(mktemp)
-        if ! "$DOCKER_BIN" compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" "${RUNNING_SERVICES[@]}" >"$UP_ERR_FILE" 2>&1; then
+        if ! bounded "$DOCKER_BIN" compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" "${RUNNING_SERVICES[@]}" >"$UP_ERR_FILE" 2>&1; then
             UP_ERR=$(tr '\r\n' ' ' < "$UP_ERR_FILE" 2>/dev/null || true)
             cat "$UP_ERR_FILE" >> "$LOG_FILE"
             rm -f "$UP_ERR_FILE"
-            fail "$DIR" "Containers failed to start or become healthy${UP_ERR:+: $UP_ERR}"
+            fail "$DIR" "Containers failed to start or become healthy${UP_ERR:+: $UP_ERR}$(timeout_hint)"
         else
             cat "$UP_ERR_FILE" >> "$LOG_FILE"
             rm -f "$UP_ERR_FILE"

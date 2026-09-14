@@ -30,7 +30,7 @@ Relative paths resolve from the directory where the updater is invoked. Use abso
 
 ## CLI options and stack hooks
 
-Use `--help` for all options: `--dry-run` (`-d`), `--verbose` (`-v`), `--quiet` / `--no-verbose` (`-q`), `--base-dir DIR` (`-b`), `--exclude DIRS` (`-e`), `--prune` (`-p`), `--no-prune`, `--no-autostart`, `--wait-timeout SEC`, and `--no-hooks`.
+Use `--help` for all options: `--dry-run` (`-d`), `--verbose` (`-v`), `--quiet` / `--no-verbose` (`-q`), `--base-dir DIR` (`-b`), `--exclude DIRS` (`-e`), `--prune` (`-p`), `--no-prune`, `--no-autostart`, `--wait-timeout SEC`, `--stack-timeout SEC`, and `--no-hooks`.
 
 A `.updaterignore` file inside a stack directory excludes it from updates and autostart. With `RUN_HOOKS=true` (default), trusted `pre-update.sh` and `post-update.sh` files run inside each active stack (executed directly if marked executable, or via Bash otherwise). Context variables `STACK_NAME`, `STACK_DIR`, and `ACTIVE_SERVICES` are exported for hook scripts. A failed pre-hook skips its update; a failed post-hook marks the run failed. Dry runs only log hooks. Disable them with `--no-hooks` or `RUN_HOOKS=false`.
 
@@ -51,6 +51,8 @@ A `.updaterignore` file inside a stack directory excludes it from updates and au
 | `PULL_RETRIES` | `3` | Maximum pull attempts, at least 1 |
 | `PULL_RETRY_DELAY` | `5` | Seconds between failed pull attempts |
 | `WAIT_TIMEOUT` | `300` | Maximum seconds for Compose's running/healthy wait, at least 1 |
+| `STACK_TIMEOUT` | `1800` | Hard cap in seconds on each stack's Docker calls (pull / up / inspect / start); `0` disables |
+| `LOCK_STALE_SECONDS` | `0` | Log the lock's age when a competing run has held it this long; `0` disables |
 | `LOG_MAX_SIZE_KB` | `0` | Rotate above this size at startup; 0 disables rotation; retain five compressed archives |
 | `NOTIFY_FAILURE_WEBHOOK` | empty | Optional failure notification endpoint |
 | `NOTIFY_SUCCESS_WEBHOOK` | empty | Optional successful-run summary endpoint |
@@ -67,7 +69,7 @@ Only running or restarting services are selected. Paused-only and stopped-only s
 
 A failed pull skips recreation for that stack. Status, autostart, pull, startup, and pruning failures are logged and result in exit code 1; other stacks continue where possible. Pruning is skipped after failures. Docker/Compose preflight failures stop the run. Success, including no eligible stacks, returns 0. Interrupts use exit codes 130/143.
 
-The health wait detects startup failures; it does not roll back updates or guarantee continued health. Services without health checks need only reach the running state. The timeout bounds the health wait, not image downloads or the entire command. `image prune -f` removes dangling images across the daemon, including images unrelated to included stacks; it does not remove all unused tagged images. Set `PRUNE_IMAGES=false` to disable this.
+The health wait detects startup failures; it does not roll back updates or guarantee continued health. Services without health checks need only reach the running state. `WAIT_TIMEOUT` bounds the health wait only, not image downloads or the whole command. `STACK_TIMEOUT` additionally bounds each individual Docker call, so a Docker socket call that wedges cannot stall the run — and therefore the run lock — indefinitely; when it fires, the failure is logged with the cap that triggered it. Set `STACK_TIMEOUT` below your scheduler's interval so one stack cannot consume the whole window. Note that `STACK_TIMEOUT` requires `timeout` on `PATH`, and a stack-level cap cannot tear down a nested Compose child that ignores `SIGTERM`, which is why no whole-run timeout option is offered: a run-wide cap that cannot reliably kill its own children would only give false assurance. `image prune -f` removes dangling images across the daemon, including images unrelated to included stacks; it does not remove all unused tagged images. Set `PRUNE_IMAGES=false` to disable this.
 
 ### Optional autostart
 

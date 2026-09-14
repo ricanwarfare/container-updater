@@ -38,7 +38,9 @@ if args[:2] == ['compose', 'pull']:
     n = int(counter.read_text()) + 1 if counter.exists() else 1
     counter.write_text(str(n))
     sys.exit(1 if mode == 'pull_fail' or (mode == 'retry' and n == 1) else 0)
-if args[:2] == ['compose', 'up']: sys.exit(1 if mode == 'up_fail' else 0)
+if args[:2] == ['compose', 'up']:
+    if mode == 'hang': time.sleep(300)
+    sys.exit(1 if mode == 'up_fail' else 0)
 if args[:2] == ['image', 'prune']: sys.exit(1 if mode == 'prune_fail' else 0)
 print('unexpected arguments', args, file=sys.stderr)
 sys.exit(2)
@@ -355,6 +357,84 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(payload['service'], str(special))
         self.assertIn('--max-time', args)
         self.assertIn('--fail', args)
+
+    def test_stuck_compose_call_is_bounded_not_hung(self):
+        # A Docker call that never returns must not hang the run until reboot.
+        start = time.monotonic()
+        result = self.run_updater(MODE='hang', STACK_TIMEOUT='2')
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 8, f'run hung for {elapsed:.1f}s')
+        self.assertEqual(result.returncode, 1)
+        log = (self.root / 'logs/run.log').read_text()
+        self.assertIn('STACK_TIMEOUT', log)
+
+    def test_stack_timeout_zero_disables_the_cap(self):
+        # With the cap disabled the helper must not inject a timeout wrapper.
+        result = self.run_updater(STACK_TIMEOUT='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        up = self.calls(('compose', 'up'))[0]['args']
+        self.assertNotIn('timeout', up)
+
+    def test_run_timeout_is_not_offered(self):
+        # Deliberately absent: a run-wide cap cannot reliably tear down a nested
+        # Compose child from bash, so shipping it would give false assurance.
+        result = self.run_updater(args=['--run-timeout', '5'])
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(self.calls())
+
+    def test_stale_lock_is_reported_loudly(self):
+        locks = self.root / 'locks'
+        locks.mkdir()
+        lock = locks / 'run.lock'
+        lock.write_text('')
+        stale = time.time() - 7200
+        os.utime(lock, (stale, stale))
+        holder = subprocess.Popen(
+            ['flock', str(lock), 'sleep', '15'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                probe = subprocess.run(['flock', '-n', str(lock), 'true'])
+                if probe.returncode != 0:
+                    break
+                time.sleep(.02)
+            result = self.run_updater(LOCK_STALE_SECONDS='60')
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('already running', result.stderr)
+            self.assertIn('LOCK_STALE_SECONDS', result.stderr)
+            self.assertIn('LOCK_STALE_SECONDS', (self.root / 'logs/run.log').read_text())
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+
+    def test_fresh_lock_is_not_reported_as_stale(self):
+        locks = self.root / 'locks'
+        locks.mkdir()
+        lock = locks / 'run.lock'
+        lock.write_text('')
+        holder = subprocess.Popen(
+            ['flock', str(lock), 'sleep', '15'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                probe = subprocess.run(['flock', '-n', str(lock), 'true'])
+                if probe.returncode != 0:
+                    break
+                time.sleep(.02)
+            result = self.run_updater(LOCK_STALE_SECONDS='99999')
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn('LOCK_STALE_SECONDS', result.stderr)
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+
+    def test_new_numeric_settings_are_validated(self):
+        for key in ('STACK_TIMEOUT', 'LOCK_STALE_SECONDS'):
+            with self.subTest(key=key):
+                self.assertEqual(self.run_updater(**{key: 'abc'}).returncode, 1)
+                self.assertFalse(self.calls())
 
 
 if __name__ == '__main__':
