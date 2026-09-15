@@ -224,16 +224,25 @@ PLANNED_COUNT=0
 FAILURES=0
 # Bound a Docker/recreate call so one wedged socket call cannot strand this run
 # (and its lock) for days. Exit 124 from timeout means the cap was hit.
+LAST_BOUNDED_RC=0
 bounded() {
     if (( STACK_TIMEOUT > 0 )); then
         timeout --kill-after=30 --signal=TERM "$STACK_TIMEOUT" "$@"
+        LAST_BOUNDED_RC=$?
+        return "$LAST_BOUNDED_RC"
     else
         "$@"
+        LAST_BOUNDED_RC=$?
+        return "$LAST_BOUNDED_RC"
     fi
 }
 timeout_hint() {
-    # Translate a 124/137 exit into an explicit, diagnosable message.
-    if (( STACK_TIMEOUT > 0 )); then
+    # Only claim a timeout when the preceding bounded call ACTUALLY timed out.
+    # timeout(1) returns 124 when it kills the child, 137 when --kill-after fires.
+    # Without this guard every ordinary failure (bad tag, 429, network) was
+    # mislabelled "the Docker call likely hung", which is actively misleading in
+    # the failure webhook alert.
+    if (( STACK_TIMEOUT > 0 )) && (( LAST_BOUNDED_RC == 124 || LAST_BOUNDED_RC == 137 )); then
         printf ' (hit STACK_TIMEOUT=%ss; the Docker call likely hung)' "$STACK_TIMEOUT"
     fi
 }
