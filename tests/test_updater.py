@@ -93,6 +93,10 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for prefix in [('start',), ('compose', 'pull'), ('compose', 'up'), ('image',)]:
             self.assertFalse(self.calls(prefix))
+        log = (self.root / 'logs/run.log').read_text()
+        self.assertIn('[DRY RUN] Inspection started', log)
+        self.assertIn('[DRY RUN] Inspection finished: no updates, image pruning, hooks, or webhooks were applied', log)
+        self.assertNotIn('Global Update finished', log)
 
     def test_failures_are_nonzero_and_continue_to_next_stack(self):
         other = self.base / 'second'

@@ -256,7 +256,11 @@ fail() {
         send_webhook "$NOTIFY_FAILURE_WEBHOOK" "$payload"
     fi
 }
-log_msg 'Global Update started'
+if [ "$DRY_RUN" = true ]; then
+    log_msg '[DRY RUN] Inspection started; no updates or notifications will be applied'
+else
+    log_msg 'Global Update started'
+fi
 if ! "$DOCKER_BIN" info >> "$LOG_FILE" 2>&1; then
     fail Docker 'Daemon is unavailable'
     exit 1
@@ -399,8 +403,13 @@ if [ "$PRUNE_IMAGES" = true ] && (( ${#DOCKER_DIRS[@]} > 0 && FAILURES == 0 )); 
     fi
 fi
 DURATION=$((SECONDS - START_TIME))
-log_msg "Summary: ${#DOCKER_DIRS[@]} stacks, $UPDATED_COUNT updated, $SKIPPED_COUNT skipped, $PLANNED_COUNT planned, $FAILURES failure(s), ${DURATION}s"
-log_msg "Global Update finished: $FAILURES failure(s)"
+if [ "$DRY_RUN" = true ]; then
+    log_msg "[DRY RUN] Inspection summary: ${#DOCKER_DIRS[@]} stacks, $PLANNED_COUNT planned, $SKIPPED_COUNT skipped, $FAILURES failure(s), ${DURATION}s"
+    log_msg "[DRY RUN] Inspection finished: no updates, image pruning, hooks, or webhooks were applied; $FAILURES failure(s)"
+else
+    log_msg "Summary: ${#DOCKER_DIRS[@]} stacks, $UPDATED_COUNT updated, $SKIPPED_COUNT skipped, $PLANNED_COUNT planned, $FAILURES failure(s), ${DURATION}s"
+    log_msg "Global Update finished: $FAILURES failure(s)"
+fi
 if (( FAILURES > 0 )); then exit 1; fi
 if [ -n "${NOTIFY_SUCCESS_WEBHOOK:-}" ] && [ "$DRY_RUN" = false ]; then
     MESSAGE=$(json_string "Docker Updater Finished: $UPDATED_COUNT/${#DOCKER_DIRS[@]} updated, $SKIPPED_COUNT skipped (${DURATION}s)")

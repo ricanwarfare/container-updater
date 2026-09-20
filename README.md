@@ -32,7 +32,7 @@ Relative paths resolve from the directory where the updater is invoked. Use abso
 
 Use `--help` for all options: `--dry-run` (`-d`), `--verbose` (`-v`), `--quiet` / `--no-verbose` (`-q`), `--base-dir DIR` (`-b`), `--exclude DIRS` (`-e`), `--prune` (`-p`), `--no-prune`, `--no-autostart`, `--wait-timeout SEC`, `--stack-timeout SEC`, and `--no-hooks`.
 
-A `.updaterignore` file inside a stack directory excludes it from updates and autostart. With `RUN_HOOKS=true` (default), trusted `pre-update.sh` and `post-update.sh` files run inside each active stack (executed directly if marked executable, or via Bash otherwise). Context variables `STACK_NAME`, `STACK_DIR`, and `ACTIVE_SERVICES` are exported for hook scripts. A failed pre-hook skips its update; a failed post-hook marks the run failed. Dry runs only log hooks. Disable them with `--no-hooks` or `RUN_HOOKS=false`.
+A `.updaterignore` file inside a stack directory excludes it from updates and autostart. With `RUN_HOOKS=true` (default), trusted `pre-update.sh` and `post-update.sh` files run inside each active stack (executed directly if marked executable, or via Bash otherwise). Context variables `STACK_NAME`, `STACK_DIR`, and `ACTIVE_SERVICES` are exported for hook scripts. A failed pre-hook skips its update; a failed post-hook marks the run failed. Dry runs only log hooks and end with an explicit `[DRY RUN] Inspection finished` status, never `Global Update finished`. Disable them with `--no-hooks` or `RUN_HOOKS=false`.
 
 ## Configuration
 
