@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+VERSION="1.0.0"
+
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ]; do
     DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
@@ -8,12 +10,14 @@ while [ -h "$SOURCE" ]; do
     [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+SCRIPT_PATH="$(cd -P "$(dirname "$SOURCE")" && pwd)/$(basename "$SOURCE")"
 # Explicit caller settings take precedence over the trusted shell config file.
 CONFIG_KEYS=(BASE_DIR LOG_FILE DRY_RUN PRUNE_IMAGES LOCK_FILE VERBOSE AUTOSTART
     AUTOSTART_RETRY_DELAY PULL_RETRIES PULL_RETRY_DELAY LOG_MAX_SIZE_KB
     EXCLUDE_DIRS DOCKER_BIN NOTIFY_FAILURE_WEBHOOK WAIT_TIMEOUT
     COMPOSE_WAIT_TIMEOUT RUN_HOOKS NOTIFY_SUCCESS_WEBHOOK
-    STACK_TIMEOUT LOCK_STALE_SECONDS)
+    STACK_TIMEOUT LOCK_STALE_SECONDS
+    SELF_UPDATE GITHUB_REPO)
 declare -A CALLER_CONFIG=()
 for key in "${CONFIG_KEYS[@]}"; do
     if [[ -v $key ]]; then CALLER_CONFIG[$key]="${!key}"; fi
@@ -23,6 +27,201 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     source <(sed 's/\r$//' "$SCRIPT_DIR/.env")
 fi
 for key in "${!CALLER_CONFIG[@]}"; do printf -v "$key" '%s' "${CALLER_CONFIG[$key]}"; done
+
+version_gt() {
+    local v1="${1#v}" v2="${2#v}"
+    if [[ "$v1" == "$v2" ]]; then return 1; fi
+    local IFS=.
+    local i arr1=($v1) arr2=($v2)
+    for ((i=0; i<${#arr1[@]} || i<${#arr2[@]}; i++)); do
+        local n1=${arr1[i]:-0}
+        local n2=${arr2[i]:-0}
+        n1=${n1%%[^0-9]*}
+        n2=${n2%%[^0-9]*}
+        n1=${n1:-0}
+        n2=${n2:-0}
+        if (( 10#$n1 > 10#$n2 )); then return 0; fi
+        if (( 10#$n1 < 10#$n2 )); then return 1; fi
+    done
+    return 1
+}
+
+fetch_release_info() {
+    local repo="$1"
+    REMOTE_TAG=""
+    ASSET_URL=""
+    RAW_URL=""
+
+    local curl_cmd=(curl -sSL --connect-timeout 10 --max-time 30)
+    local headers=(-H "Accept: application/vnd.github.v3+json" -H "User-Agent: container-updater")
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        headers+=(-H "Authorization: token $GITHUB_TOKEN")
+    fi
+
+    local api_url="https://api.github.com/repos/${repo}/releases/latest"
+    local release_json
+    release_json=$("${curl_cmd[@]}" "${headers[@]}" "$api_url" 2>/dev/null || true)
+
+    if [[ $release_json =~ \"tag_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+        REMOTE_TAG="${BASH_REMATCH[1]}"
+        if [[ $release_json =~ \"browser_download_url\"[[:space:]]*:[[:space:]]*\"([^\"]*/releases/download/[^\"]*/updater\.sh)\" ]] || \
+           [[ $release_json =~ \"browser_download_url\"[[:space:]]*:[[:space:]]*\"([^\"]*/updater\.sh)\" ]]; then
+            ASSET_URL="${BASH_REMATCH[1]}"
+        fi
+    fi
+
+    if [ -z "$REMOTE_TAG" ]; then
+        local redirect_url
+        redirect_url=$(curl -sIL -o /dev/null -w "%{url_effective}" "https://github.com/${repo}/releases/latest" 2>/dev/null || true)
+        if [[ $redirect_url == */releases/tag/* ]]; then
+            REMOTE_TAG="${redirect_url##*/}"
+        fi
+    fi
+
+    if [ -z "$REMOTE_TAG" ]; then
+        return 1
+    fi
+
+    if [ -z "$ASSET_URL" ]; then
+        ASSET_URL="https://github.com/${repo}/releases/download/${REMOTE_TAG}/updater.sh"
+    fi
+    RAW_URL="https://raw.githubusercontent.com/${repo}/${REMOTE_TAG}/updater.sh"
+    return 0
+}
+
+download_and_verify_update() {
+    local repo="$1" tag="$2" asset_url="$3" raw_url="$4" target="$5"
+    local target_dir
+    target_dir="$(dirname "$target")"
+    if [ ! -w "$target_dir" ] || { [ -e "$target" ] && [ ! -w "$target" ]; }; then
+        echo "Target location '$target' is not writable" >&2
+        return 1
+    fi
+
+    local tmp_file="${target}.tmp.$$"
+    rm -f "$tmp_file"
+
+    local downloaded=false
+    if [ -n "$asset_url" ]; then
+        if curl -sSL --fail --connect-timeout 10 --max-time 60 "$asset_url" -o "$tmp_file" 2>/dev/null; then
+            downloaded=true
+        fi
+    fi
+    if [ "$downloaded" = false ] && [ -n "$raw_url" ]; then
+        if curl -sSL --fail --connect-timeout 10 --max-time 60 "$raw_url" -o "$tmp_file" 2>/dev/null; then
+            downloaded=true
+        fi
+    fi
+
+    if [ "$downloaded" = false ] || [ ! -s "$tmp_file" ]; then
+        rm -f "$tmp_file"
+        echo "Failed to download update from $asset_url or $raw_url" >&2
+        return 1
+    fi
+
+    local first_line
+    first_line=$(head -n 1 "$tmp_file" 2>/dev/null || true)
+    if [[ ! $first_line =~ ^#!.*bash ]]; then
+        rm -f "$tmp_file"
+        echo "Downloaded file is invalid: missing bash shebang" >&2
+        return 1
+    fi
+
+    if ! bash -n "$tmp_file" >/dev/null 2>&1; then
+        rm -f "$tmp_file"
+        echo "Downloaded file contains syntax errors" >&2
+        return 1
+    fi
+
+    chmod --reference="$target" "$tmp_file" 2>/dev/null || chmod 755 "$tmp_file"
+    chmod +x "$tmp_file"
+    if ! mv -f "$tmp_file" "$target"; then
+        rm -f "$tmp_file"
+        echo "Failed to replace $target" >&2
+        return 1
+    fi
+    return 0
+}
+
+perform_self_update_standalone() {
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "[FATAL] curl is required for self-update" >&2
+        return 1
+    fi
+    local lock="${LOCK_FILE:-}"
+    if [ -z "$lock" ]; then
+        if [ -n "${BASE_DIR:-}" ] && [ -d "$BASE_DIR" ]; then
+            lock="$BASE_DIR/container-updater/updater.lock"
+        else
+            lock="$SCRIPT_DIR/.updater.lock"
+        fi
+    fi
+    mkdir -p "$(dirname "$lock")" 2>/dev/null || true
+    if command -v flock >/dev/null 2>&1 && [ -w "$(dirname "$lock")" ]; then
+        exec 9>>"$lock"
+        if ! flock -n 9; then
+            echo "[FATAL] Another updater instance is already running" >&2
+            return 1
+        fi
+    fi
+
+    local repo="${GITHUB_REPO:-ricanwarfare/container-updater}"
+    echo "Checking for releases on GitHub: $repo..."
+    local REMOTE_TAG="" ASSET_URL="" RAW_URL=""
+    if ! fetch_release_info "$repo"; then
+        echo "[ERROR] Could not find any release on GitHub for $repo" >&2
+        return 1
+    fi
+    echo "Latest release: $REMOTE_TAG (current: $VERSION)"
+    if ! version_gt "$REMOTE_TAG" "$VERSION"; then
+        echo "Already up to date (version $VERSION)."
+        return 0
+    fi
+    if [ "${DRY_RUN:-false}" = true ]; then
+        echo "[DRY RUN] Newer version $REMOTE_TAG is available. Would update $SCRIPT_PATH"
+        return 0
+    fi
+    echo "Downloading and applying update to $SCRIPT_PATH..."
+    local err_msg
+    if err_msg=$(download_and_verify_update "$repo" "$REMOTE_TAG" "$ASSET_URL" "$RAW_URL" "$SCRIPT_PATH" 2>&1); then
+        echo "Successfully updated container-updater to $REMOTE_TAG (was $VERSION)."
+        return 0
+    else
+        echo "[ERROR] Update failed: $err_msg" >&2
+        return 1
+    fi
+}
+
+perform_self_update_scheduled() {
+    if ! command -v curl >/dev/null 2>&1; then
+        log_msg "[WARNING] curl is required for self-update; skipping self-update check"
+        return 1
+    fi
+    local repo="${GITHUB_REPO:-ricanwarfare/container-updater}"
+    log_msg "Checking for updates from GitHub: $repo"
+    local REMOTE_TAG="" ASSET_URL="" RAW_URL=""
+    if ! fetch_release_info "$repo"; then
+        log_msg "[WARNING] Self-update check failed: could not fetch release info for $repo"
+        return 1
+    fi
+    if ! version_gt "$REMOTE_TAG" "$VERSION"; then
+        log_msg "Self-update: already up to date (version $VERSION)"
+        return 1
+    fi
+    if [ "$DRY_RUN" = true ]; then
+        log_msg "[DRY RUN] Self-update: newer version $REMOTE_TAG is available (current: $VERSION). Would update $SCRIPT_PATH"
+        return 1
+    fi
+    log_msg "Downloading and applying update to $SCRIPT_PATH ($REMOTE_TAG)..."
+    local err_msg
+    if err_msg=$(download_and_verify_update "$repo" "$REMOTE_TAG" "$ASSET_URL" "$RAW_URL" "$SCRIPT_PATH" 2>&1); then
+        log_msg "Self-update: successfully updated to $REMOTE_TAG (was $VERSION)"
+        return 0
+    else
+        log_msg "[WARNING] Self-update failed: $err_msg; continuing with current version ($VERSION)"
+        return 1
+    fi
+}
 
 show_help() {
     cat <<'HELP'
@@ -38,6 +237,10 @@ Usage: updater.sh [OPTIONS]
       --wait-timeout SEC    Health wait timeout (0 uses 300 seconds)
       --stack-timeout SEC   Hard cap on one stack's Docker calls (0 disables, default 1800)
       --no-hooks            Disable pre/post-update shell hooks
+  -u, --self-update          Update this script to latest GitHub release and exit
+      --auto-update         Enable self-update check before stack updates
+      --no-auto-update      Disable self-update check before stack updates
+      --version             Show script version and exit
   -h, --help                 Show this help
 HELP
 }
@@ -52,6 +255,10 @@ while (( $# > 0 )); do
         --no-prune) PRUNE_IMAGES=false; shift ;;
         --no-autostart) AUTOSTART=false; shift ;;
         --no-hooks) RUN_HOOKS=false; shift ;;
+        --version) echo "container-updater $VERSION"; exit 0 ;;
+        -u|--self-update) DO_SELF_UPDATE=true; shift ;;
+        --auto-update) SELF_UPDATE=true; shift ;;
+        --no-auto-update) SELF_UPDATE=false; shift ;;
         -h|--help) show_help; exit 0 ;;
         -e|--exclude)
             if (( $# < 2 )) || [[ -z $2 || $2 == --* ]]; then
@@ -75,6 +282,11 @@ done
 if [ "$WAIT_TIMEOUT" = 0 ]; then WAIT_TIMEOUT=300; fi
 RUN_HOOKS="${RUN_HOOKS:-true}"
 
+if [ "${DO_SELF_UPDATE:-false}" = true ]; then
+    perform_self_update_standalone
+    exit $?
+fi
+
 BASE_DIR="${BASE_DIR:-$HOME/docker}"
 # Resolve before entering stack directories so relative log/lock paths stay stable.
 if [ ! -d "$BASE_DIR" ]; then
@@ -95,7 +307,9 @@ LOG_MAX_SIZE_KB="${LOG_MAX_SIZE_KB:-0}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"
 STACK_TIMEOUT="${STACK_TIMEOUT:-1800}"
 LOCK_STALE_SECONDS="${LOCK_STALE_SECONDS:-0}"
-for key in DRY_RUN PRUNE_IMAGES VERBOSE AUTOSTART RUN_HOOKS; do
+SELF_UPDATE="${SELF_UPDATE:-false}"
+GITHUB_REPO="${GITHUB_REPO:-ricanwarfare/container-updater}"
+for key in DRY_RUN PRUNE_IMAGES VERBOSE AUTOSTART RUN_HOOKS SELF_UPDATE; do
     if [[ ${!key} != true && ${!key} != false ]]; then
         echo "[FATAL] $key must be true or false" >&2
         exit 1
@@ -112,10 +326,52 @@ if (( PULL_RETRIES == 0 || WAIT_TIMEOUT == 0 )); then
     echo "[FATAL] PULL_RETRIES and WAIT_TIMEOUT must be positive" >&2
     exit 1
 fi
-DOCKER_BIN=$(command -v "${DOCKER_BIN:-docker}") || {
-    echo "[FATAL] Docker executable not found" >&2; exit 1;
-}
+# Expand PATH with common candidate directories if missing (critical for Synology DSM Task Scheduler)
+for extra_path in /usr/local/bin /usr/syno/bin /var/packages/ContainerManager/target/usr/bin /var/packages/Docker/target/usr/bin /snap/bin; do
+    if [ -d "$extra_path" ] && [[ ":$PATH:" != *":$extra_path:"* ]]; then
+        PATH="$PATH:$extra_path"
+    fi
+done
+
+if [ -n "${DOCKER_BIN:-}" ]; then
+    if [ -x "$DOCKER_BIN" ]; then
+        :
+    elif resolved=$(command -v "$DOCKER_BIN" 2>/dev/null); then
+        DOCKER_BIN="$resolved"
+    else
+        echo "[FATAL] Docker executable not found" >&2
+        exit 1
+    fi
+else
+    if resolved=$(command -v docker 2>/dev/null); then
+        DOCKER_BIN="$resolved"
+    else
+        DOCKER_CANDIDATES=(
+            /usr/local/bin/docker
+            /var/packages/ContainerManager/target/usr/bin/docker
+            /var/packages/Docker/target/usr/bin/docker
+            /usr/syno/bin/docker
+            /snap/bin/docker
+            /usr/bin/docker
+            /bin/docker
+        )
+        for candidate in "${DOCKER_CANDIDATES[@]}"; do
+            if [ -x "$candidate" ]; then
+                DOCKER_BIN="$candidate"
+                break
+            fi
+        done
+    fi
+fi
+if [ -z "${DOCKER_BIN:-}" ] || [ ! -x "$DOCKER_BIN" ]; then
+    echo "[FATAL] Docker executable not found" >&2
+    exit 1
+fi
 if [[ $DOCKER_BIN != /* ]]; then DOCKER_BIN="$PWD/$DOCKER_BIN"; fi
+DOCKER_DIR="$(dirname "$DOCKER_BIN")"
+if [[ ":$PATH:" != *":$DOCKER_DIR:"* ]]; then
+    PATH="$PATH:$DOCKER_DIR"
+fi
 command -v flock >/dev/null || { echo "[FATAL] flock is required" >&2; exit 1; }
 if (( STACK_TIMEOUT > 0 )); then
     command -v timeout >/dev/null || { echo "[FATAL] timeout is required when STACK_TIMEOUT is set" >&2; exit 1; }
@@ -256,6 +512,15 @@ fail() {
         send_webhook "$NOTIFY_FAILURE_WEBHOOK" "$payload"
     fi
 }
+if [ "${_UPDATER_ALREADY_UPDATED:-0}" = "1" ]; then
+    log_msg "Resumed execution after self-update to $VERSION"
+elif [ "$SELF_UPDATE" = true ]; then
+    if perform_self_update_scheduled; then
+        log_msg "Restarting updater with new version..."
+        exec 9>&-
+        _UPDATER_ALREADY_UPDATED=1 exec "${BASH:-bash}" "$SCRIPT_PATH" "$@"
+    fi
+fi
 if [ "$DRY_RUN" = true ]; then
     log_msg '[DRY RUN] Inspection started; no updates or notifications will be applied'
 else

@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify Bash Syntax
+        run: bash -n updater.sh
+
+      - name: Run ShellCheck
+        run: shellcheck --severity=warning -e SC2034,SC1090 updater.sh
+
+      - name: Run Regression Tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Generate Checksums
+        run: sha256sum updater.sh > updater.sh.sha256
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" updater.sh updater.sh.sha256 \
+            --title "$TAG_NAME" \
+            --generate-notes

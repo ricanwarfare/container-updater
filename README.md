@@ -30,7 +30,7 @@ Relative paths resolve from the directory where the updater is invoked. Use abso
 
 ## CLI options and stack hooks
 
-Use `--help` for all options: `--dry-run` (`-d`), `--verbose` (`-v`), `--quiet` / `--no-verbose` (`-q`), `--base-dir DIR` (`-b`), `--exclude DIRS` (`-e`), `--prune` (`-p`), `--no-prune`, `--no-autostart`, `--wait-timeout SEC`, `--stack-timeout SEC`, and `--no-hooks`.
+Use `--help` for all options: `--dry-run` (`-d`), `--verbose` (`-v`), `--quiet` / `--no-verbose` (`-q`), `--base-dir DIR` (`-b`), `--exclude DIRS` (`-e`), `--prune` (`-p`), `--no-prune`, `--no-autostart`, `--wait-timeout SEC`, `--stack-timeout SEC`, `--no-hooks`, `--self-update` (`-u`), `--auto-update`, `--no-auto-update`, and `--version`.
 
 A `.updaterignore` file inside a stack directory excludes it from updates and autostart. With `RUN_HOOKS=true` (default), trusted `pre-update.sh` and `post-update.sh` files run inside each active stack (executed directly if marked executable, or via Bash otherwise). Context variables `STACK_NAME`, `STACK_DIR`, and `ACTIVE_SERVICES` are exported for hook scripts. A failed pre-hook skips its update; a failed post-hook marks the run failed. Dry runs only log hooks and end with an explicit `[DRY RUN] Inspection finished` status, never `Global Update finished`. Disable them with `--no-hooks` or `RUN_HOOKS=false`.
 
@@ -40,7 +40,9 @@ A `.updaterignore` file inside a stack directory excludes it from updates and au
 | --- | --- | --- |
 | `BASE_DIR` | `$HOME/docker` | Parent of stack directories |
 | `EXCLUDE_DIRS` | empty | Colon-separated folder names to skip, including autostart |
-| `DOCKER_BIN` | Docker in `PATH` | Docker executable path |
+| `DOCKER_BIN` | autodetected | Docker executable path (autodetects `docker` in `PATH` or Synology/system candidate paths) |
+| `SELF_UPDATE` | `false` | Check for and apply updates from GitHub releases before stack updates |
+| `GITHUB_REPO` | `ricanwarfare/container-updater` | GitHub repository to check for releases |
 | `LOG_FILE` | `$BASE_DIR/container-updater/updater.log` | Append-only run log |
 | `LOCK_FILE` | `$BASE_DIR/container-updater/updater.lock` | Persistent file used for a kernel lock |
 | `DRY_RUN` | `false` | Inspect and log proposed actions without Docker mutations or webhooks |
@@ -90,6 +92,32 @@ The container must have the label applied by Compose and use `always` or `unless
 
 Failure payloads include `service`, `error`, and `host`, plus `text` and `content` message fields. Successful-run payloads include `status`, `updated`, `skipped`, `total`, `duration`, `host`, `text`, and `content`. Logs also summarize updated, skipped, planned, and failed operations and elapsed seconds. JSON strings are escaped, requests have a 10-second connect timeout and 30-second total timeout, and delivery failures are logged. Dry runs do not send notifications. The message fields retain the remote version’s Slack/Discord-oriented payload format; endpoint compatibility has not been verified against live services. Other providers may require an adapter.
 
+### Synology DSM compatibility & Docker autodetection
+
+On systems like Synology DSM, Task Scheduler executes scheduled user-defined scripts in a restricted environment with a minimal `PATH` (`/bin:/sbin:/usr/bin:/usr/sbin`). As a result, standard paths like `/usr/local/bin` and package directories are missing from the environment.
+
+`updater.sh` automatically handles this:
+1. It inspects and expands `PATH` with `/usr/local/bin`, `/usr/syno/bin`, `/var/packages/ContainerManager/target/usr/bin`, and `/var/packages/Docker/target/usr/bin` if present.
+2. If `DOCKER_BIN` is not explicitly configured, it searches `PATH` and probes known candidate locations:
+   - `/usr/local/bin/docker` (standard Synology symlink)
+   - `/var/packages/ContainerManager/target/usr/bin/docker` (DSM 7 Container Manager)
+   - `/var/packages/Docker/target/usr/bin/docker` (DSM 6 / legacy Docker package)
+   - `/usr/syno/bin/docker`
+   - `/snap/bin/docker`
+   - `/usr/bin/docker` and `/bin/docker`
+3. When resolved, the directory containing Docker is also added to `PATH` so Docker Compose plugins and companion tools are discoverable.
+
+### Self-updating from GitHub releases
+
+`updater.sh` can automatically check for and download new releases from GitHub:
+
+- **Manual update**: Run `./updater.sh --self-update` (or `-u`) to check GitHub releases, download updates, verify integrity, and atomically update the script in place.
+- **Scheduled updates**: Set `SELF_UPDATE=true` in `.env` or pass `--auto-update`. Before updating stacks, the script checks for a newer version tag on GitHub. If found, it updates `updater.sh` and restarts execution cleanly via `exec` under the existing process lock.
+- **Verification & safety**:
+  - The updater attempts to download the release asset `updater.sh` first, falling back to the raw repository script for the release tag.
+  - Downloaded updates are strictly validated before replacement: verifying non-empty content, bash shebang, and bash syntax check (`bash -n`).
+  - Dry runs (`-d`, `--dry-run`) report when a newer release is available without mutating the script.
+
 ### Lock migration
 
 `flock` releases the lock automatically after the updater and its child commands exit, including crashes. The lock file remains on disk; its presence does not mean a run is active. Never delete it during a run. All invocations must use the same lock path to serialize access.
@@ -115,4 +143,5 @@ bash -n updater.sh
 python3 -m unittest discover -s tests -v
 ```
 
-Automated testing is configured via GitHub Actions in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which automatically validates Bash syntax, runs ShellCheck linting, and executes all 34 regression tests on every push and pull request.
+Automated testing is configured via GitHub Actions in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which automatically validates Bash syntax, runs ShellCheck linting, and executes all 52 regression tests on every push and pull request.
+

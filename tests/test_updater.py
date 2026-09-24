@@ -460,6 +460,151 @@ class UpdaterTests(unittest.TestCase):
                 self.assertEqual(self.run_updater(**{key: 'abc'}).returncode, 1)
                 self.assertFalse(self.calls())
 
+    def test_version_flag(self):
+        result = self.run_updater(args=['--version'])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('container-updater 1.0.0', result.stdout)
+
+    def test_self_update_boolean_setting_validated(self):
+        result = self.run_updater(SELF_UPDATE='invalid')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('SELF_UPDATE must be true or false', result.stderr)
+
+    def test_docker_missing_fails_fatally(self):
+        env_without_docker = {k: v for k, v in self.env.items() if k not in ('DOCKER_BIN', 'PATH')}
+        empty_bin = self.root / 'empty_bin'
+        empty_bin.mkdir()
+        flock_path = shutil.which('flock')
+        flock_dir = str(Path(flock_path).parent) if flock_path else '/usr/bin'
+        env_without_docker['PATH'] = f"{empty_bin}:{flock_dir}:/bin"
+        if not shutil.which('docker'):
+            result = self.run_updater(**env_without_docker)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('Docker executable not found', result.stderr)
+
+    def test_docker_autodetection_from_path(self):
+        bindir = self.root / 'usr_local_bin'
+        bindir.mkdir()
+        fake_docker = bindir / 'docker'
+        fake_docker.write_text(FAKE_DOCKER)
+        fake_docker.chmod(0o755)
+        env_without_docker = {k: v for k, v in self.env.items() if k not in ('DOCKER_BIN', 'PATH')}
+        env_without_docker['PATH'] = f"{bindir}:{self.env['PATH']}"
+        result = self.run_updater(**env_without_docker)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def _setup_fake_curl(self):
+        fake_curl = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+mode = os.environ.get('CURL_MODE', '')
+
+out_file = None
+if '-o' in args:
+    out_file = args[args.index('-o') + 1]
+
+url = [a for a in args if a.startswith('http')][-1] if any(a.startswith('http') for a in args) else ''
+
+if 'releases/latest' in url:
+    if mode == 'rate_limit':
+        data = json.dumps({'message': 'API rate limit exceeded'})
+    elif mode == 'not_found':
+        sys.exit(22)
+    elif mode == 'no_asset':
+        data = json.dumps({'tag_name': 'v2.0.0', 'assets': []})
+    elif mode == 'older':
+        data = json.dumps({'tag_name': 'v0.9.0', 'assets': []})
+    else:
+        data = json.dumps({
+            'tag_name': 'v2.0.0',
+            'assets': [{
+                'name': 'updater.sh',
+                'browser_download_url': 'https://example.invalid/download/updater.sh'
+            }]
+        })
+    print(data)
+    sys.exit(0)
+
+if out_file:
+    if mode == 'syntax_error':
+        content = "#!/bin/bash\nif then fi\n"
+    elif mode == 'bad_shebang':
+        content = "<html>500 Error</html>\n"
+    else:
+        content = "#!/bin/bash\necho 'new version 2.0.0'\n"
+    with open(out_file, 'w') as f:
+        f.write(content)
+    sys.exit(0)
+
+sys.exit(0)
+'''
+        bindir = self.root / 'bin'
+        bindir.mkdir(exist_ok=True)
+        curl = bindir / 'curl'
+        curl.write_text(fake_curl)
+        curl.chmod(0o755)
+        return bindir
+
+    def test_self_update_standalone_already_up_to_date(self):
+        bindir = self._setup_fake_curl()
+        result = self.run_updater(args=['--self-update'], CURL_MODE='older',
+                                 PATH=f"{bindir}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Already up to date', result.stdout)
+
+    def test_self_update_standalone_with_asset(self):
+        bindir = self._setup_fake_curl()
+        result = self.run_updater(args=['--self-update'],
+                                 PATH=f"{bindir}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Successfully updated container-updater to v2.0.0', result.stdout)
+        new_content = (self.root / 'updater.sh').read_text()
+        self.assertIn('new version 2.0.0', new_content)
+
+    def test_self_update_standalone_fallback_to_raw(self):
+        bindir = self._setup_fake_curl()
+        result = self.run_updater(args=['--self-update'], CURL_MODE='no_asset',
+                                 PATH=f"{bindir}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Successfully updated container-updater to v2.0.0', result.stdout)
+        new_content = (self.root / 'updater.sh').read_text()
+        self.assertIn('new version 2.0.0', new_content)
+
+    def test_self_update_dry_run_does_not_mutate(self):
+        bindir = self._setup_fake_curl()
+        orig_content = (self.root / 'updater.sh').read_text()
+        result = self.run_updater(args=['-d', '--self-update'],
+                                 PATH=f"{bindir}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('[DRY RUN] Newer version v2.0.0 is available', result.stdout)
+        self.assertEqual((self.root / 'updater.sh').read_text(), orig_content)
+
+    def test_self_update_corrupt_download_rejected(self):
+        bindir = self._setup_fake_curl()
+        orig_content = (self.root / 'updater.sh').read_text()
+        result = self.run_updater(args=['--self-update'], CURL_MODE='syntax_error',
+                                 PATH=f"{bindir}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual((self.root / 'updater.sh').read_text(), orig_content)
+
+    def test_self_update_scheduled_in_regular_run(self):
+        bindir = self._setup_fake_curl()
+        marker = self.root / 'updated_marker'
+        curl_script = (bindir / 'curl').read_text()
+        curl_script = curl_script.replace(
+            "content = \"#!/bin/bash\\necho 'new version 2.0.0'\\n\"",
+            f"content = \"#!/bin/bash\\ntouch '{marker}'\\nexit 0\\n\""
+        )
+        (bindir / 'curl').write_text(curl_script)
+
+        env = {k: v for k, v in self.env.items() if k != 'PATH'}
+        env['PATH'] = f"{bindir}:{self.env['PATH']}"
+        result = self.run_updater(SELF_UPDATE='true', **env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(marker.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
+
+
