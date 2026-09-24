@@ -31,8 +31,9 @@ for key in "${!CALLER_CONFIG[@]}"; do printf -v "$key" '%s' "${CALLER_CONFIG[$ke
 version_gt() {
     local v1="${1#v}" v2="${2#v}"
     if [[ "$v1" == "$v2" ]]; then return 1; fi
-    local IFS=.
-    local i arr1=($v1) arr2=($v2)
+    local arr1=() arr2=() i
+    IFS=. read -r -a arr1 <<< "$v1"
+    IFS=. read -r -a arr2 <<< "$v2"
     for ((i=0; i<${#arr1[@]} || i<${#arr2[@]}; i++)); do
         local n1=${arr1[i]:-0}
         local n2=${arr2[i]:-0}
